@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.10.1] - 2026-09-10
+
+### Fixed
+- Repaired `knowledge_update` recovery for knowledge bases whose SQLite chunks are ahead of a short or truncated vector file; update now rebuilds or re-embeds missing vectors instead of leaving the KB in `error` (#13).
+- Aligned the published Tree-sitter runtime and grammar dependency graph so clean npm installs no longer emit peer override warnings for `tree-sitter@0.25.1` incompatibilities (#14).
+
 ## [0.10.0] - 2026-08-27
 
 ### Added
