@@ -5,19 +5,23 @@
 ## tree-sitter 版本相容性
 
 ```
-✅ 可用: tree-sitter@0.25.1 + root override + current supported grammars
+✅ 可用/發布基準: tree-sitter@0.21.1 + peer-aligned supported grammars
+✅ 舊可用但會警告: tree-sitter@0.25.1 + root runtime override + mixed grammar peers
 ✅ 舊基準: tree-sitter@0.22.4 + grammars@0.23.x (Node 22+/24 source build may fail)
 ❌ 失敗: tree-sitter@0.25.0 (Node 22+/24 source build still uses too old C++ standard)
 ❌ 失敗: tree-sitter@0.25.1 without root override (TypeScript/Java/Rust peer ranges lag)
 ❌ 失敗: tree-sitter@0.21.1 + grammar@0.25.0 (nodeTypeNamesById undefined)
 ```
 
-Current parser baseline pins `tree-sitter@0.25.1`, `tree-sitter-bash@0.25.1`,
-`tree-sitter-c@0.24.1`, `tree-sitter-cpp@0.23.4`, `tree-sitter-qmljs@0.3.1`,
-`tree-sitter-javascript/python/go@0.25.0`, `tree-sitter-rust@0.24.0`, and keeps
-`tree-sitter-typescript@0.23.2` / `tree-sitter-java@0.23.5`.
-The root `overrides.tree-sitter` is intentional: strict npm installs otherwise reject legacy grammar peer ranges
-even though the supported AST language smoke tests pass against the 0.25.1 ABI.
+Current parser baseline pins `tree-sitter@0.21.1`, `tree-sitter-bash@0.21.0`,
+`tree-sitter-c@0.21.4`, `tree-sitter-cpp@0.23.2`, `tree-sitter-go@0.21.2`,
+`tree-sitter-javascript@0.23.1`, `tree-sitter-python@0.21.0`, `tree-sitter-rust@0.21.0`,
+`tree-sitter-qmljs@0.3.1`, and keeps `tree-sitter-typescript@0.23.2` /
+`tree-sitter-java@0.23.5`. This is intentionally older than the latest runtime/grammar mix because
+npm only applies overrides from the consumer root, not from an installed dependency package; a
+published extension must therefore ship a dependency graph that is peer-clean without relying on
+package-local overrides. If upgrading back to newer grammar packages, first verify both a clean
+npm install from the packed tarball and the supported AST language smoke tests.
 
 `.h` headers remain text by default. Header files are ambiguous between C and C++; use explicit
 `.hpp`/`.hh`/`.hxx` for C++ AST indexing. Qt macro forms such as `Q_OBJECT`, `signals:`, and `slots:`
@@ -126,16 +130,16 @@ Bun binary resolution may also fail to resolve hoisted native-package dependenci
 On minimal Ubuntu/Debian servers, OMP's Bun-based npm install currently cannot use
 `better-sqlite3` prebuilds and falls back to `node-gyp rebuild`. A failure like
 `prebuild-install warn install 'better-sqlite3' is not yet supported in Bun` followed by
-`gyp ERR! stack Error: not found: make` means the host is missing native build tools, not that
-the tree-sitter peer warning is fatal. Install `build-essential` and retry:
+`gyp ERR! stack Error: not found: make` means the host is missing native build tools. Current
+releases should not emit Tree-sitter peer override warnings during a clean npm install; if that
+warning reappears, re-check the parser dependency graph before treating it as harmless. Install
+`build-essential` and retry:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y build-essential python3
 omp install npm:pi-knowledge@latest --force
 ```
 
-The `warn: incorrect peer dependency "tree-sitter@0.25.1"` line is expected under the root
-override and is safe when the AST language smoke tests pass.
 
 ## Windows OMP model-worker IPC
 
