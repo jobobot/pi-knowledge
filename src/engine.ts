@@ -259,6 +259,12 @@ function tempVectorPath(vectorPath: string): string {
 	return `${vectorPath}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 }
 
+function assertEmbeddingBatchSize(vectors: Float32Array[], expected: number, operation: string): void {
+	if (vectors.length !== expected) {
+		throw new Error(`Embedding provider returned ${vectors.length} vectors for ${expected} ${operation} chunks`);
+	}
+}
+
 function retrievalModeFor(
 	mode: SearchMode,
 ): Exclude<SearchMode, "auto" | "code" | "config" | "docs" | "errors" | "decision"> {
@@ -1073,6 +1079,7 @@ export class KnowledgeEngine {
 					signal,
 				);
 				if (signal?.aborted) throw new Error("Cancelled");
+				assertEmbeddingBatchSize(vectors, batch.length, "add");
 				persistEmbeddingMetadata(db, kb.id, embeddingConfig, vectors);
 				insertChunks(db, kb.id, batch);
 				writer.append(vectors);
@@ -1264,7 +1271,7 @@ export class KnowledgeEngine {
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
 		const currentSignature =
 			kb.embedding_dimension === null ? undefined : embeddingSignature(embeddingConfig, kb.embedding_dimension);
-		const canReuseExistingVectors =
+		let canReuseExistingVectors =
 			kb.embedding_signature !== null && kb.embedding_dimension !== null && kb.embedding_signature === currentSignature;
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
@@ -1285,6 +1292,25 @@ export class KnowledgeEngine {
 				entries.push({ id: chunk.id, vectorIndex: existingIndex });
 				existingHashes.set(chunk.content_hash, entries);
 				existingIndex++;
+			}
+			if (canReuseExistingVectors) {
+				const oldVectorReader = openVectorReader(vectorPath);
+				try {
+					if (
+						!oldVectorReader ||
+						oldVectorReader.count !== existingIndex ||
+						oldVectorReader.dim !== kb.embedding_dimension
+					) {
+						canReuseExistingVectors = false;
+						const vectorCount = oldVectorReader?.count ?? 0;
+						const vectorDimension = oldVectorReader?.dim ?? 0;
+						const message = `Stored vector file for "${kb.name}" is incomplete or incompatible (${vectorCount} vectors/${vectorDimension}d for ${existingIndex} chunks/${kb.embedding_dimension}d); rebuilding all vectors`;
+						updateIndexingJob(this.db, kb.id, { phase: "embedding", message });
+						onProgress?.(message);
+					}
+				} finally {
+					oldVectorReader?.close();
+				}
 			}
 			const reusableHashes = canReuseExistingVectors
 				? existingHashes
@@ -1330,6 +1356,7 @@ export class KnowledgeEngine {
 					signal,
 				);
 				if (signal?.aborted) throw new Error("Cancelled");
+				assertEmbeddingBatchSize(newVectors, batch.length, "update");
 				addedVectorWriter.append(newVectors);
 				for (let i = 0; i < batch.length; i++) {
 					const indexes = newVectorIndexByHash.get(batch[i].content_hash) ?? [];
@@ -1472,19 +1499,39 @@ export class KnowledgeEngine {
 				const indexes = indexesByHash.get(hash);
 				return indexes?.shift();
 			};
+			const repairMissingVector = async (chunk: Chunk): Promise<Float32Array> => {
+				const message = `Re-embedding chunk with missing stored vector: ${chunk.id}`;
+				if (!this.db) throw new Error("Engine not initialized");
+				updateIndexingJob(this.db, kb.id, {
+					phase: "embedding",
+					message,
+					processed_files: scannedFiles,
+					processed_chunks: finalChunkCount,
+					added_chunks: addedCount,
+					removed_chunks: idsToRemove.length,
+					unchanged_chunks: unchanged,
+				});
+				onProgress?.(message);
+				const repairedVectors = await embedDocuments([buildChunkEmbeddingText(chunk)], signal);
+				if (signal?.aborted) throw new Error("Cancelled");
+				assertEmbeddingBatchSize(repairedVectors, 1, "repair");
+				const [repairedVector] = repairedVectors;
+				if (!repairedVector) throw new Error(`Embedding provider returned no repaired vector for chunk: ${chunk.id}`);
+				return repairedVector;
+			};
 			try {
 				for (const chunk of iterateChunksByKB(this.db, kb.id)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					if (idsToRemoveSet.has(chunk.id)) continue;
 					const oldVectorIndex = takeVectorIndex(oldVectorIndexByHash, chunk.content_hash);
 					const newVectorIndex = takeVectorIndex(newVectorIndexByHash, chunk.content_hash);
-					const vector =
+					let vector =
 						oldVectorReader && oldVectorIndex !== undefined
 							? oldVectorReader.read(oldVectorIndex)
 							: newVectorReader && newVectorIndex !== undefined
 								? newVectorReader.read(newVectorIndex)
 								: undefined;
-					if (!vector) throw new Error(`Missing vector while rebuilding knowledge base: ${chunk.id}`);
+					if (!vector) vector = await repairMissingVector(chunk);
 					finalEmbeddingDimension ??= vector.length;
 					vectorWriter.append([vector]);
 					finalChunkCount++;
@@ -2223,6 +2270,7 @@ export class KnowledgeEngine {
 				signal,
 			);
 			throwIfAborted(signal);
+			assertEmbeddingBatchSize(vectors, batch.length, "import");
 			persistEmbeddingMetadata(this.db, kb.id, embeddingConfig, vectors);
 			insertChunks(this.db, kb.id, batch);
 			insertSymbols(this.db, kb.id, symbols);

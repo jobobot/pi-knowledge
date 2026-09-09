@@ -437,6 +437,88 @@ describe("KnowledgeEngine", () => {
 			expect(kb.embedding_dimension).toBe(384);
 		});
 
+		it("repairs short vector files during update instead of marking the knowledge base error", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-short-vector-update-"));
+			try {
+				writeFileSync(
+					join(projectDir, "a.txt"),
+					"ShortVectorAlphaToken content about vector repair and update recovery. ".repeat(3),
+				);
+				writeFileSync(
+					join(projectDir, "b.txt"),
+					"ShortVectorBetaToken content about vector repair and update recovery. ".repeat(3),
+				);
+				await engine.add(projectDir, "Short Vector Repair");
+				const [{ id }] = engine.list();
+				const vectorPath = join(TEST_DIR, "vectors", `${id}.bin`);
+				const vectorFile = readFileSync(vectorPath);
+				const header = Buffer.from(vectorFile.subarray(0, 8));
+				const originalCount = header.readUInt32LE(0);
+				const dimension = header.readUInt32LE(4);
+				expect(originalCount).toBe(2);
+				expect(dimension).toBe(384);
+				header.writeUInt32LE(originalCount - 1, 0);
+				writeFileSync(
+					vectorPath,
+					Buffer.concat([header, vectorFile.subarray(8, 8 + (originalCount - 1) * dimension * 4)]),
+				);
+
+				const result = await engine.update("Short Vector Repair");
+				const [kb] = engine.list();
+				const repairedHeader = readFileSync(vectorPath).subarray(0, 8);
+
+				expect(result).toEqual({ added: 2, removed: 2, unchanged: 0 });
+				expect(kb.status).toBe("ready");
+				expect(kb.chunk_count).toBe(2);
+				expect(repairedHeader.readUInt32LE(0)).toBe(2);
+				expect(repairedHeader.readUInt32LE(4)).toBe(384);
+				expect(
+					(await engine.search("ShortVectorBetaToken", { mode: "fast", kb_id: "Short Vector Repair" })).total_count,
+				).toBe(1);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("re-embeds a chunk when a stored vector read misses despite a matching header count", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-missing-vector-update-"));
+			try {
+				writeFileSync(
+					join(projectDir, "a.txt"),
+					"MissingVectorAlphaToken content about vector repair and update recovery. ".repeat(3),
+				);
+				writeFileSync(
+					join(projectDir, "b.txt"),
+					"MissingVectorBetaToken content about vector repair and update recovery. ".repeat(3),
+				);
+				await engine.add(projectDir, "Missing Vector Repair");
+				const [{ id }] = engine.list();
+				const vectorPath = join(TEST_DIR, "vectors", `${id}.bin`);
+				const vectorFile = readFileSync(vectorPath);
+				const header = vectorFile.subarray(0, 8);
+				const originalCount = header.readUInt32LE(0);
+				const dimension = header.readUInt32LE(4);
+				expect(originalCount).toBe(2);
+				expect(dimension).toBe(384);
+				writeFileSync(vectorPath, Buffer.concat([header, vectorFile.subarray(8, 8 + dimension * 4)]));
+				const updates: string[] = [];
+
+				const result = await engine.update("Missing Vector Repair", (message) => updates.push(message));
+				const [kb] = engine.list();
+				const repairedHeader = readFileSync(vectorPath).subarray(0, 8);
+
+				expect(result).toEqual({ added: 0, removed: 0, unchanged: 2 });
+				expect(kb.status).toBe("ready");
+				expect(repairedHeader.readUInt32LE(0)).toBe(2);
+				expect(updates.some((message) => message.includes("Re-embedding chunk with missing stored vector"))).toBe(true);
+				expect(
+					(await engine.search("MissingVectorBetaToken", { mode: "fast", kb_id: "Missing Vector Repair" })).total_count,
+				).toBe(1);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
 		it("coalesces overlapping updates for the same knowledge base", async () => {
 			const filePath = join(TEST_DIR, "coalesce.txt");
 			mkdirSync(TEST_DIR, { recursive: true });
