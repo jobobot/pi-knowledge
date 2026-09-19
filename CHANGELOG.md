@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.10.2] - 2026-09-19
+
+### Fixed
+- Allowed OpenAI-compatible embedding endpoints to run without an API key and added `PI_KNOWLEDGE_EMBEDDING_API_KEY` as an embedding-specific bearer token override (#15).
+- Added `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE` so self-hosted embedding servers can use request batch sizes below the default 64 chunk limit (#16).
+
 ## [0.10.1] - 2026-09-10
 
 ### Fixed

@@ -39,6 +39,39 @@ describe("embedding provider", () => {
 		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
 	});
 
+	it("allows unauthenticated custom OpenAI-compatible embedding APIs", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "http://127.0.0.1:8080/v1");
+		const fetchMock = vi.fn(async (_input: URL | string, _init?: RequestInit) =>
+			jsonResponse({ data: [{ embedding: [0.1, 0.2] }] }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await embedDocuments(["hello"]);
+
+		const [, init] = fetchMock.mock.calls[0];
+		expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
+	});
+
+	it("prefers PI_KNOWLEDGE_EMBEDDING_API_KEY over OPENAI_API_KEY", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "http://127.0.0.1:8080/v1");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_API_KEY", "embedding-key");
+		vi.stubEnv("OPENAI_API_KEY", "openai-key");
+		const fetchMock = vi.fn(async (_input: URL | string, _init?: RequestInit) =>
+			jsonResponse({ data: [{ embedding: [0.1, 0.2] }] }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await embedDocuments(["hello"]);
+
+		const [, init] = fetchMock.mock.calls[0];
+		expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer embedding-key");
+	});
+
 	it("surfaces API embedding failures by default instead of silently falling back", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1");

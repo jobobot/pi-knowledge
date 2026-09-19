@@ -232,8 +232,17 @@ export interface SymbolSearchResponse {
 	has_more: boolean;
 }
 
-const INDEX_EMBED_BATCH_SIZE = 64;
+const DEFAULT_INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
+
+function resolveIndexEmbedBatchSize(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE?.trim();
+	if (!raw) return DEFAULT_INDEX_EMBED_BATCH_SIZE;
+	const value = Number(raw);
+	if (!Number.isFinite(value)) return DEFAULT_INDEX_EMBED_BATCH_SIZE;
+	const batchSize = Math.trunc(value);
+	return batchSize > 0 ? batchSize : DEFAULT_INDEX_EMBED_BATCH_SIZE;
+}
 
 interface DirectoryScanPlan {
 	files: number;
@@ -1013,6 +1022,7 @@ export class KnowledgeEngine {
 		}
 
 		const embeddingConfig = resolveEmbeddingConfig();
+		const embeddingBatchSize = resolveIndexEmbedBatchSize();
 		const kb = createKB(db, {
 			name,
 			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
@@ -1072,7 +1082,7 @@ export class KnowledgeEngine {
 			const flushPending = async (processedFiles?: number, totalFiles?: number): Promise<void> => {
 				if (pendingChunks.length === 0) return;
 				if (signal?.aborted) throw new Error("Cancelled");
-				const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
+				const batch = pendingChunks.splice(0, embeddingBatchSize);
 				reportProgress(`Embedding batch of ${batch.length}`, processedFiles, totalFiles);
 				const vectors = await embedDocuments(
 					batch.map((chunk) => buildChunkEmbeddingText(chunk)),
@@ -1094,7 +1104,7 @@ export class KnowledgeEngine {
 				totalFiles?: number,
 			): Promise<void> => {
 				pendingChunks.push(...chunks);
-				while (pendingChunks.length >= INDEX_EMBED_BATCH_SIZE) {
+				while (pendingChunks.length >= embeddingBatchSize) {
 					await flushPending(processedFiles, totalFiles);
 				}
 			};
@@ -1268,6 +1278,7 @@ export class KnowledgeEngine {
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
 		const embeddingConfig = resolveEmbeddingConfig();
+		const embeddingBatchSize = resolveIndexEmbedBatchSize();
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
 		const currentSignature =
 			kb.embedding_dimension === null ? undefined : embeddingSignature(embeddingConfig, kb.embedding_dimension);
@@ -1336,7 +1347,7 @@ export class KnowledgeEngine {
 			const flushPending = async (): Promise<void> => {
 				if (!this.db || !addedVectorWriter || pendingChunks.length === 0) return;
 				if (signal?.aborted) throw new Error("Cancelled");
-				const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
+				const batch = pendingChunks.splice(0, embeddingBatchSize);
 				const elapsed = Date.now() - startedAt;
 				const message = `Embedding update batch: ${addedCount} new chunks stored, ${scannedFiles} files scanned, elapsed ${formatDuration(
 					elapsed,
@@ -1395,7 +1406,7 @@ export class KnowledgeEngine {
 						continue;
 					}
 					pendingChunks.push(chunk);
-					if (pendingChunks.length >= INDEX_EMBED_BATCH_SIZE) await flushPending();
+					if (pendingChunks.length >= embeddingBatchSize) await flushPending();
 				}
 			};
 
@@ -2181,6 +2192,7 @@ export class KnowledgeEngine {
 		const { createWriteStream } = await import("node:fs");
 		const tempOutputPath = tempVectorPath(outputPath);
 		const stream = createWriteStream(tempOutputPath, { encoding: "utf-8" });
+		const progressBatchSize = resolveIndexEmbedBatchSize();
 		let count = 0;
 		const header = JSON.stringify({
 			name: kb.name,
@@ -2204,7 +2216,7 @@ export class KnowledgeEngine {
 					}),
 				);
 				count++;
-				if (count % INDEX_EMBED_BATCH_SIZE === 0) onProgress?.(`Exported ${count}/${kb.chunk_count} chunks...`);
+				if (count % progressBatchSize === 0) onProgress?.(`Exported ${count}/${kb.chunk_count} chunks...`);
 			}
 			await finishWriteStream(stream);
 			throwIfAborted(signal);
@@ -2241,6 +2253,7 @@ export class KnowledgeEngine {
 		const stream = createReadStream(inputPath, { encoding: "utf-8" });
 		const lines = createInterface({ input: stream, crlfDelay: Infinity });
 		const embeddingConfig = resolveEmbeddingConfig();
+		const embeddingBatchSize = resolveIndexEmbedBatchSize();
 		let header: ImportHeader | undefined;
 		let kb: KnowledgeBase | undefined;
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -2253,7 +2266,7 @@ export class KnowledgeEngine {
 		const flushPending = async (): Promise<void> => {
 			if (!this.db || !kb || !vectorWriter || pendingChunks.length === 0) return;
 			throwIfAborted(signal);
-			const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
+			const batch = pendingChunks.splice(0, embeddingBatchSize);
 			const symbols = pendingSymbols.splice(0);
 			const total = header?.chunk_count;
 			const message = `Embedding import batch: ${inserted}/${total ?? "unknown"} chunks stored`;
@@ -2326,7 +2339,7 @@ export class KnowledgeEngine {
 				chunk.content_tokenized = preTokenizeForFTS(buildChunkEmbeddingText(chunk));
 				pendingChunks.push(chunk);
 				pendingSymbols.push(...extractSymbols(imported.content, imported.file_path, imported.file_type));
-				if (pendingChunks.length >= INDEX_EMBED_BATCH_SIZE) await flushPending();
+				if (pendingChunks.length >= embeddingBatchSize) await flushPending();
 			}
 			if (!header) throw new Error("Empty import file");
 			if (!kb || !vectorWriter || !tempVectorFile) throw new Error("Import did not create a knowledge base");

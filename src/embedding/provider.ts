@@ -158,13 +158,14 @@ async function embedViaAPI(
 	const safeTexts = prefixedTexts.map((text) =>
 		text.length > config.maxChars ? text.slice(0, config.maxChars) : text,
 	);
-	const apiKey = process.env.OPENAI_API_KEY;
-	if (!apiKey) throw new Error("OPENAI_API_KEY required for openai embedding");
+	const apiKey = cleanEnv(process.env.PI_KNOWLEDGE_EMBEDDING_API_KEY) ?? cleanEnv(process.env.OPENAI_API_KEY);
 	if (!config.baseUrl) throw new Error("OpenAI embedding base URL is not configured");
 	const endpoint = new URL("embeddings", `${config.baseUrl.replace(/\/+$/, "")}/`);
+	const headers: Record<string, string> = { "Content-Type": "application/json" };
+	if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 	const res = await fetch(endpoint, {
 		method: "POST",
-		headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+		headers,
 		body: JSON.stringify({ input: safeTexts, model: config.model }),
 		signal,
 	});

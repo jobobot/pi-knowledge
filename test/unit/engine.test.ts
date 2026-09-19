@@ -37,6 +37,7 @@ describe("KnowledgeEngine", () => {
 
 	afterEach(async () => {
 		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
 		await engine.dispose();
 		rmSync(TEST_DIR, { recursive: true, force: true });
 	});
@@ -264,7 +265,7 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
-		it("hard-caps embedding batches even when one file creates many chunks", async () => {
+		it("uses the configured embedding batch size even when one file creates many chunks", async () => {
 			const projectDir = mkdtempSync(join(tmpdir(), "pk-batch-cap-"));
 			try {
 				const paragraphs = Array.from({ length: 90 }, (_, i) =>
@@ -273,6 +274,7 @@ describe("KnowledgeEngine", () => {
 					),
 				);
 				writeFileSync(join(projectDir, "large.md"), paragraphs.join("\n\n"));
+				vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE", "17");
 				const updates: string[] = [];
 
 				await engine.add(projectDir, "Batch Cap", (message) => updates.push(message));
@@ -282,7 +284,31 @@ describe("KnowledgeEngine", () => {
 					.filter((value): value is string => Boolean(value))
 					.map(Number);
 				expect(batchSizes.length).toBeGreaterThan(1);
-				expect(Math.max(...batchSizes)).toBeLessThanOrEqual(64);
+				expect(Math.max(...batchSizes)).toBeLessThanOrEqual(17);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("falls back to the default embedding batch size for fractional values below one", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-batch-default-"));
+			try {
+				for (let i = 0; i < 70; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Default batch document ${i} about FractionalBatchToken indexing reliability. `.repeat(3),
+					);
+				}
+				vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE", "0.5");
+				const updates: string[] = [];
+
+				await engine.add(projectDir, "Default Batch", (message) => updates.push(message));
+
+				const batchSizes = updates
+					.map((message) => message.match(/Embedding batch of (\d+)/)?.[1])
+					.filter((value): value is string => Boolean(value))
+					.map(Number);
+				expect(batchSizes).toEqual([64, 6]);
 			} finally {
 				rmSync(projectDir, { recursive: true, force: true });
 			}
