@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.0] - 2026-09-23
+
+### Added
+- Added `PI_KNOWLEDGE_EMBEDDING_PREFIXES=on|off` so OpenAI-compatible and local embeddings can preserve or omit `query: ` / `passage: ` input prefixes while keeping default E5 behavior compatible with existing KB signatures (#18).
+- Added `semantic_hybrid` search mode for vector-backed weighted fusion without the default hybrid lexical-evidence gate, giving semantic and multilingual queries an explicit recall-oriented path while preserving `hybrid` precision defaults (#17).
+
 ## [0.10.2] - 2026-09-19
 
 ### Fixed
