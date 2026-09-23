@@ -1170,13 +1170,12 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(scanningMessage);
 				// Collect all files first to enable parallel processing
-				const skippedForCollect = createSkippedScanStats();
+				const skipped = createSkippedScanStats();
 				const allFiles: ScannableFile[] = [];
-				for (const file of iterateScannableFiles(resolvedSource, skippedForCollect, scanOptions)) {
+				for (const file of iterateScannableFiles(resolvedSource, skipped, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					allFiles.push(file);
 				}
-				Object.assign(skipped, skippedForCollect);
 
 				// Process files in parallel batches using Promise.all
 				const PARALLEL_FILE_BATCH_SIZE = 100;
@@ -1489,13 +1488,12 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(planningMessage);
 				// Collect all files first to enable parallel processing
-			const skippedForCollect = createSkippedScanStats();
+			const skipped = createSkippedScanStats();
 			const allFiles: ScannableFile[] = [];
-			for (const file of iterateScannableFiles(kb.source_path, skippedForCollect, scanOptions)) {
+			for (const file of iterateScannableFiles(kb.source_path, skipped, scanOptions)) {
 				if (signal?.aborted) throw new Error("Cancelled");
 				allFiles.push(file);
 			}
-			Object.assign(skipped, skippedForCollect);
 
 			// Prepare hash comparison: build Set of file_paths from existingHashes for O(1) lookup
 			const existingFileSet = new Set(reusableHashes.keys());
