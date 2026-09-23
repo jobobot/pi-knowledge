@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
+import { existsSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
+import { readFile as readFileAsync } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
@@ -743,7 +744,7 @@ async function extractSourceFileContent(filePath: string, signal?: AbortSignal):
 		// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
 		const { extractText } = await import("unpdf");
 		throwIfAborted(signal);
-		const buf = readFileSync(filePath);
+		const buf = await readFileAsync(filePath);
 		throwIfAborted(signal);
 		const { text } = await extractText(new Uint8Array(buf));
 		throwIfAborted(signal);
@@ -762,7 +763,7 @@ async function extractSourceFileContent(filePath: string, signal?: AbortSignal):
 		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
 	}
 	throwIfAborted(signal);
-	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
+	return { content: (await readFileAsync(filePath, "utf-8")), fileType: "text" };
 }
 
 interface ClassifiedSource {
