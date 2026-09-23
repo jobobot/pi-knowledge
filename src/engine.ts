@@ -1156,21 +1156,36 @@ export class KnowledgeEngine {
 					skipped_total: plan.skippedTotal,
 				});
 				onProgress?.(scanningMessage);
-				const skipped = createSkippedScanStats();
-				let processedFiles = 0;
-				for (const file of iterateScannableFiles(resolvedSource, skipped, scanOptions)) {
+				// Collect all files first to enable parallel processing
+				const skippedForCollect = createSkippedScanStats();
+				const allFiles: ScannableFile[] = [];
+				for (const file of iterateScannableFiles(resolvedSource, skippedForCollect, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
-					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
-					if (!extracted) {
-						latestSkippedTotal = skipped.total;
-						continue;
-					}
-					const chunks = await analyzeAndAddSymbols(extracted.content, file.relPath, extracted.fileType);
-					processedFiles++;
-					latestSkippedTotal = skipped.total;
-					if (chunks.length > 0) fileCount++;
-					await addChunks(chunks, processedFiles, plan.files);
-					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, plan.files, skipped.total);
+					allFiles.push(file);
+				}
+				Object.assign(skipped, skippedForCollect);
+
+				// Process files in parallel batches using Promise.all
+				const PARALLEL_FILE_BATCH_SIZE = 100;
+				let processedFiles = 0;
+				for (let i = 0; i < allFiles.length; i += PARALLEL_FILE_BATCH_SIZE) {
+					const batch = allFiles.slice(i, i + PARALLEL_FILE_BATCH_SIZE);
+					await Promise.all(
+						batch.map(async (file) => {
+							if (signal?.aborted) throw new Error("Cancelled");
+							const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
+							if (!extracted) {
+								latestSkippedTotal = skipped.total;
+								return;
+							}
+							const chunks = await analyzeAndAddSymbols(extracted.content, file.relPath, extracted.fileType);
+							processedFiles++;
+							latestSkippedTotal = skipped.total;
+							if (chunks.length > 0) fileCount++;
+							await addChunks(chunks, processedFiles, plan.files);
+						}),
+					);
+					reportProgress("Chunking", processedFiles, plan.files, skipped.total);
 				}
 				latestSkippedTotal = skipped.total;
 				latestSkippedSummary = summarizeSkippedScan(skipped);
@@ -1437,30 +1452,43 @@ export class KnowledgeEngine {
 					skipped_total: plan.skippedTotal,
 				});
 				onProgress?.(planningMessage);
-				const skipped = createSkippedScanStats();
-				for (const file of iterateScannableFiles(kb.source_path, skipped, scanOptions)) {
-					if (signal?.aborted) throw new Error("Cancelled");
-					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
-					if (!extracted) continue;
-					const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
-					scannedFiles++;
-					stagedSymbols.push(...analysis.symbols);
-					await processChunks(analysis.chunks);
-					if (scannedFiles % 25 === 0) {
-						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
-						updateIndexingJob(this.db, kb.id, {
-							phase: "scanning",
-							message,
-							processed_files: scannedFiles,
-							processed_chunks: scannedChunks,
-							total_files: plan.files,
-							skipped_total: skipped.total,
-							added_chunks: addedCount,
-							unchanged_chunks: unchanged,
-						});
-						onProgress?.(message);
-					}
-				}
+				// Collect all files first to enable parallel processing
+			const skippedForCollect = createSkippedScanStats();
+			const allFiles: ScannableFile[] = [];
+			for (const file of iterateScannableFiles(kb.source_path, skippedForCollect, scanOptions)) {
+				if (signal?.aborted) throw new Error("Cancelled");
+				allFiles.push(file);
+			}
+			Object.assign(skipped, skippedForCollect);
+
+			// Process files in parallel batches using Promise.all
+			const PARALLEL_FILE_BATCH_SIZE = 100;
+			for (let i = 0; i < allFiles.length; i += PARALLEL_FILE_BATCH_SIZE) {
+				const batch = allFiles.slice(i, i + PARALLEL_FILE_BATCH_SIZE);
+				await Promise.all(
+					batch.map(async (file) => {
+						if (signal?.aborted) throw new Error("Cancelled");
+						const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
+						if (!extracted) return;
+						const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
+						scannedFiles++;
+						stagedSymbols.push(...analysis.symbols);
+						await processChunks(analysis.chunks);
+					}),
+				);
+				const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "scanning",
+					message,
+					processed_files: scannedFiles,
+					processed_chunks: scannedChunks,
+					total_files: plan.files,
+					skipped_total: skipped.total,
+					added_chunks: addedCount,
+					unchanged_chunks: unchanged,
+				});
+				onProgress?.(message);
+			}
 				latestSkippedTotal = skipped.total;
 				latestSkippedSummary = summarizeSkippedScan(skipped);
 				const message = `Scanned ${scannedFiles} files, skipped ${skipped.total} (${latestSkippedSummary}), reconciling deletes...`;
