@@ -1100,15 +1100,27 @@ export class KnowledgeEngine {
 				reportProgress("Stored batch", processedFiles, totalFiles);
 			};
 
-			const addChunks = async (
-				chunks: Awaited<ReturnType<typeof chunkFile>>,
-				processedFiles?: number,
-				totalFiles?: number,
-			): Promise<void> => {
+			// Background flush task: processes pending chunks independently so
+			// file I/O and chunking don't block on embedding. This creates true
+			// producer-consumer overlap — while embeddings compute for batch N,
+			// the next batch's files are already being read and chunked.
+			let flushTask: Promise<void> | null = null;
+			const triggerFlush = (processedFiles?: number, totalFiles?: number): void => {
+				if (flushTask) return; // one background task running at a time
+				flushTask = (async () => {
+					try {
+						while (pendingChunks.length >= embeddingBatchSize) {
+							await flushPending(processedFiles, totalFiles);
+						}
+					} finally {
+						flushTask = null;
+					}
+				})();
+			};
+
+			const addChunks = (chunks: Awaited<ReturnType<typeof chunkFile>>): void => {
 				pendingChunks.push(...chunks);
-				while (pendingChunks.length >= embeddingBatchSize) {
-					await flushPending(processedFiles, totalFiles);
-				}
+				triggerFlush(); // fire-and-forget, don't await
 			};
 			const addSymbols = (content: string, filePath: string, fileType: string): void => {
 				insertSymbols(db, kb.id, extractSymbols(content, filePath, fileType));
@@ -1130,12 +1142,12 @@ export class KnowledgeEngine {
 				const chunks = await chunkUrl(source, signal);
 				fileCount = 1;
 				addSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), source, "html");
-				await addChunks(chunks);
+				addChunks(chunks);
 			} else if (isFile) {
 				const extracted = await extractSourceFileContent(resolvedSource, signal);
 				fileCount = 1;
 				const chunks = await analyzeAndAddSymbols(extracted.content, resolvedSource, extracted.fileType);
-				await addChunks(chunks);
+				addChunks(chunks);
 			} else if (isDir) {
 				const plan = planDirectoryScan(resolvedSource, scanOptions, signal);
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
@@ -1182,11 +1194,13 @@ export class KnowledgeEngine {
 							processedFiles++;
 							latestSkippedTotal = skipped.total;
 							if (chunks.length > 0) fileCount++;
-							await addChunks(chunks, processedFiles, plan.files);
+							addChunks(chunks);
 						}),
 					);
 					reportProgress("Chunking", processedFiles, plan.files, skipped.total);
 				}
+				// Wait for any pending background flush to complete
+				if (flushTask) await flushTask;
 				latestSkippedTotal = skipped.total;
 				latestSkippedSummary = summarizeSkippedScan(skipped);
 				const finalizingMessage = `Scanned ${processedFiles} files, skipped ${skipped.total} (${latestSkippedSummary}), finalizing...`;
@@ -1203,7 +1217,7 @@ export class KnowledgeEngine {
 			} else {
 				fileCount = 1;
 				const chunks = await analyzeAndAddSymbols(source, "inline-text", "text");
-				await addChunks(chunks);
+				addChunks(chunks);
 			}
 
 			await flushPending();
