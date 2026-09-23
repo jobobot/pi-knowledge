@@ -193,8 +193,8 @@
 - 查詢時擴窗保留上下文，但不污染原始 chunk 內容。
 - 意圖排序讓 `stt/stt.go`、`bot/errors.go`、`INSTALL.md` 這類目標依查詢語意勝出，而不是被長文件或測試檔覆蓋。
 - Confidence gate 讓無意義或低證據查詢可以回傳 0 結果，避免 agent 建立錯誤信心。
-- Mode contract 讓 agent 依任務型態選擇 `fast`、`semantic`、`hybrid`、`adaptive` 或 `deep`，並在空/弱結果時重試一次，降低 false negative。
-- Tool-owned `auto` mode 降低 agent 忘記切換模式的機率；exact lookup fallback 必須防 semantic false positive。
+- Mode contract 讓 agent 依任務型態選擇 `fast`、`semantic`、`semantic_hybrid`、`hybrid`、`adaptive` 或 `deep`，並在空/弱結果時重試一次，降低 false negative。
+- Tool-owned `auto` mode 降低 agent 忘記切換模式的機率；exact lookup fallback 必須防 semantic false positive。`semantic_hybrid` 保持 explicit opt-in，不作為預設 hybrid 的 lexical evidence gate 替代品。
 
 **重建索引邊界**:
 - Query normalization、ranking、confidence gate、diversity 屬於 query-time 變更，既有 KB 可直接受益。

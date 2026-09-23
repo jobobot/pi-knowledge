@@ -1084,6 +1084,19 @@ describe("KnowledgeEngine", () => {
 			expect(result.results).toEqual([]);
 		});
 
+		it("semantic_hybrid mode can return vector-backed results without a lexical anchor", async () => {
+			await engine.add("Relevant content about authentication tokens and command permissions.", "Semantic Hybrid");
+
+			const result = await engine.search("zzzxqv blorfwump qqqqnonexistent", {
+				mode: "semantic_hybrid",
+				limit: 5,
+			});
+
+			expect(result.total_count).toBeGreaterThan(0);
+			expect(result.results[0]?.kb_name).toBe("Semantic Hybrid");
+			expect(result.mode_used).toBe("semantic_hybrid");
+		});
+
 		it("hybrid mode suppresses low-confidence garbage queries with one accidental token match", async () => {
 			await engine.add(
 				"Review examples mention unknown edge cases, reproducible failures, and unrelated diagnostics.",

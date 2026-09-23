@@ -67,7 +67,7 @@ TUI rendering currently uses Pi's stable default tool rendering plus targeted re
 - **Contextual Retrieval without remote chunk rewriting**: applies Anthropic's Contextual Retrieval insight locally by embedding file path, file type, Markdown breadcrumbs, and AST-derived code structure such as symbols, scope, parent symbol, and signatures with each chunk. This improves standalone chunk meaning without sending private source chunks to an LLM for context generation.
 - **Hybrid retrieval with diagnosable scores**: combines lexical BM25 anchors and vectors with normalized weighted score fusion. RRF (Cormack et al. 2009) remains the baseline reference, but weighted fusion is used by default because project dogfood showed RRF compressed scores too much for ranking diagnostics.
 - **MMR-style diversity**: uses Maximal Marginal Relevance ideas (Goldstein and Carbonell 1998), file interleaving, vector redundancy checks, and bounded adaptive-window overlap collapse so repeated README or same-file chunks do not dominate top results. Code KBs with AST metadata can also use same-parent/sibling structure during adaptive expansion.
-- **Intent-aware and self-correcting agent UX**: mode selection (`auto`, `fast`, `semantic`, `hybrid`, `adaptive`, `deep`), ranking diagnostics, and `knowledge_doctor` turn retrieval failures into concrete next actions instead of silent bad answers.
+- **Intent-aware and self-correcting agent UX**: mode selection (`auto`, `fast`, `semantic`, `semantic_hybrid`, `hybrid`, `adaptive`, `deep`), ranking diagnostics, and `knowledge_doctor` turn retrieval failures into concrete next actions instead of silent bad answers.
 - **Confidence gating**: low-evidence hybrid matches can return zero results instead of unrelated chunks, reducing false confidence when the KB does not contain the answer.
 
 This is intentionally not a heavy ColBERT-style late-interaction index yet (Khattab and Zaharia 2020). The current product chooses lightweight local embeddings, BM25, query-aware ranking, optional cross-encoder reranking, streamed vector scans, and health diagnostics for commercial usefulness with low setup cost.
@@ -125,6 +125,7 @@ omp install ./pi-knowledge
 - `fast`: BM25 keyword search for exact symbols, commands, and identifiers.
 - `semantic`: vector search for conceptual matches.
 - `hybrid`: lexical-anchored BM25 + vector search with normalized weighted score fusion. It requires keyword evidence to avoid low-confidence semantic false positives.
+- `semantic_hybrid`: vector search plus optional BM25 weighted fusion without the hybrid lexical-evidence gate; use explicitly for semantic/multilingual queries where lexical overlap is weak but fused scoring is still useful.
 - `deep`: hybrid retrieval followed by cross-encoder reranking.
 - `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
 - `auto`: selects a primary mode from the query shape and retries alternate modes when results are empty or weak.
@@ -136,7 +137,7 @@ Mode selection contract:
 
 - Start with `hybrid` for most project questions that contain useful lexical anchors.
 - Use `fast` for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings.
-- Use `semantic` when the query is conceptual, exact terms may differ from indexed wording, or hybrid returns no lexical matches.
+- Use `semantic` when the query is conceptual and exact terms may differ from indexed wording; use `semantic_hybrid` when weak lexical overlap should not block vector-backed fused results.
 - Use `adaptive` when the answer needs nearby code, neighboring documentation sections, AST-related sibling methods where indexed, or enough context to make a safe edit.
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
 - If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.

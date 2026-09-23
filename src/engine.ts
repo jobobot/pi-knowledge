@@ -86,6 +86,7 @@ export type SearchMode =
 	| "fast"
 	| "semantic"
 	| "hybrid"
+	| "semantic_hybrid"
 	| "deep"
 	| "adaptive"
 	| "code"
@@ -1736,8 +1737,9 @@ export class KnowledgeEngine {
 				);
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
+				const semanticHybrid = retrievalMode === "semantic_hybrid";
 				const bm25Results = searchBM25(db, normalizedQuery || query, candidateLimit, kb.id);
-				if (bm25Results.length === 0) continue;
+				if (bm25Results.length === 0 && !semanticHybrid) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
 				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
@@ -1788,6 +1790,7 @@ export class KnowledgeEngine {
 			scored = unique.filter((result) => {
 				const chunk = getChunkById(db, result.chunkId);
 				if (!chunk) return false;
+				if (retrievalMode === "semantic_hybrid") return result.score >= tuning.minHybridScore;
 				return result.score >= tuning.minHybridScore && hasEnoughLexicalEvidence(chunk, queryTokens);
 			});
 		}
@@ -1956,7 +1959,7 @@ export class KnowledgeEngine {
 			suggestions:
 				results.length === 0
 					? [
-							"Try mode 'fast' for exact symbols or mode 'semantic' for conceptual wording.",
+							"Try mode 'fast' for exact symbols, mode 'semantic' for pure vector search, or mode 'semantic_hybrid' when weak lexical overlap should not block fused vector results.",
 							"Run knowledge_status if the KB should contain this answer.",
 						]
 					: undefined,

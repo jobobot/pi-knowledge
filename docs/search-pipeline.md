@@ -9,6 +9,7 @@
 | `fast` | BM25 only | <10ms |
 | `semantic` | Vector only | <50ms |
 | `hybrid` (default) | BM25 + Vector + weighted score fusion + confidence gate + diversity | <100ms |
+| `semantic_hybrid` | Vector + optional BM25 weighted fusion without lexical evidence gate | <100ms |
 | `deep` | Hybrid + Cross-encoder rerank | <500ms |
 | `adaptive` | Hybrid + query-time contextual window expansion | <150ms |
 
@@ -94,6 +95,7 @@ Current hybrid retrieval:
 5. Apply query-aware ranking boosts and penalties.
 6. Drop low-confidence candidates that lack enough lexical evidence.
 
+`semantic_hybrid` keeps vector retrieval even when BM25 has no lexical hits and skips the lexical-evidence gate. It is explicit opt-in for semantic or multilingual queries where weak lexical overlap would hide useful vector matches; `hybrid` remains the default precision mode.
 ```
 hybrid_score = normalized_bm25 * bm25_weight + normalized_vector * vector_weight
 ```
@@ -177,7 +179,8 @@ function applyFilters(results: SearchResult[], filters: SearchFilters): SearchRe
 ```
 query → mode dispatch:
   fast:     BM25(top-50) → filter → paginate
-  semantic: embed → vectorSearch(top-50) → filter → paginate
+  semantic: vectorSearch(top-50) → filter → paginate
+  semantic_hybrid: vectorSearch(top-N) + BM25(top-N when available) → weighted fusion → query-aware ranking → score gate → filter → diversify → paginate
   hybrid:   BM25(top-N) + vectorSearch(top-N) → weighted fusion → query-aware ranking → confidence gate → filter → diversify → paginate
   deep:     hybrid candidates → crossEncoderRerank → diversify → return
   adaptive: hybrid seeds → contextual window expansion → diversify → paginate

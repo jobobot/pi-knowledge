@@ -459,7 +459,7 @@ export default function (pi: ExtensionAPI) {
 			"Use knowledge_search to find relevant context before answering domain questions",
 			"Default to mode 'hybrid' for most project questions with useful lexical anchors; it fuses BM25 and semantic vectors but still requires keyword evidence",
 			"Use mode 'fast' for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings",
-			"Use mode 'semantic' for broad conceptual questions when exact terms may differ from the indexed wording or hybrid returns no lexical matches",
+			"Use mode 'semantic' for pure vector search when exact terms may differ from indexed wording; use mode 'semantic_hybrid' when you want vector recall plus BM25/fusion scoring without the hybrid lexical evidence gate",
 			"Use mode 'adaptive' when the user needs surrounding implementation context, related nearby sections, or enough context to make a code change",
 			"Use mode 'deep' for high-stakes answers, ambiguous top results, or final verification where slower cross-encoder reranking is acceptable",
 			"Use profile 'low_token' for slow local models that need fewer, stricter, longer snippets; use profile 'precision' for identifiers/errors and 'recall' or 'long_context' for broad prose/document research",
@@ -474,6 +474,7 @@ export default function (pi: ExtensionAPI) {
 					Type.Literal("fast"),
 					Type.Literal("semantic"),
 					Type.Literal("hybrid"),
+					Type.Literal("semantic_hybrid"),
 					Type.Literal("deep"),
 					Type.Literal("adaptive"),
 					Type.Literal("code"),
@@ -517,6 +518,7 @@ export default function (pi: ExtensionAPI) {
 						| "fast"
 						| "semantic"
 						| "hybrid"
+						| "semantic_hybrid"
 						| "deep"
 						| "adaptive"
 						| "code"

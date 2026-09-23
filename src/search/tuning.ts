@@ -17,6 +17,7 @@ type SearchModeForTuning =
 	| "fast"
 	| "semantic"
 	| "hybrid"
+	| "semantic_hybrid"
 	| "deep"
 	| "adaptive"
 	| "code"
@@ -216,7 +217,7 @@ function chooseRuntimeProfile(input: SearchTuningInput): RuntimeProfile {
 		return "precision";
 	}
 	if (input.mode === "docs" || input.mode === "decision" || input.mode === "adaptive") return "long_context";
-	if (input.mode === "semantic") return "recall";
+	if (input.mode === "semantic" || input.mode === "semantic_hybrid") return "recall";
 	if (looksErrorQuery(input.query) || looksExactOrCodeQuery(input.query)) return "precision";
 	const hasDocumentSource = input.kbSourceTypes.some((sourceType) => sourceType === "url" || sourceType === "text");
 	if (looksLongContextQuery(input.query) || hasDocumentSource) return "long_context";
