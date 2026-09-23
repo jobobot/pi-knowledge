@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -1354,6 +1355,27 @@ export class KnowledgeEngine {
 					oldVectorReader?.close();
 				}
 			}
+			// Load file-level content hashes for fast skip detection during updates
+			const fileHashesByPath = new Map<string, string>();
+			if (this.db && canReuseExistingVectors) {
+				try {
+					this.db.exec(`CREATE TABLE IF NOT EXISTS file_hashes (
+						kb_id TEXT NOT NULL,
+						file_path TEXT NOT NULL,
+						content_hash TEXT NOT NULL,
+						PRIMARY KEY (kb_id, file_path)
+					)`);
+					const rows = this.db.prepare(
+						"SELECT file_path, content_hash FROM file_hashes WHERE kb_id = ?",
+					).all(kb.id) as Array<{ file_path: string; content_hash: string }>;
+					for (const row of rows) {
+						fileHashesByPath.set(row.file_path, row.content_hash);
+					}
+				} catch {
+					// File hashes table creation/query failed; proceed without optimization
+				}
+			}
+
 			const reusableHashes = canReuseExistingVectors
 				? existingHashes
 				: new Map<string, Array<{ id: string; vectorIndex: number }>>();
@@ -1475,8 +1497,13 @@ export class KnowledgeEngine {
 			}
 			Object.assign(skipped, skippedForCollect);
 
-			// Process files in parallel batches using Promise.all
+			// Prepare hash comparison: build Set of file_paths from existingHashes for O(1) lookup
+			const existingFileSet = new Set(reusableHashes.keys());
+
+			// Process files in parallel batches using Promise.all with file-level hash dedup
 			const PARALLEL_FILE_BATCH_SIZE = 100;
+			let staleFilesToRecord: Array<{ filePath: string; hash: string }> = [];
+
 			for (let i = 0; i < allFiles.length; i += PARALLEL_FILE_BATCH_SIZE) {
 				const batch = allFiles.slice(i, i + PARALLEL_FILE_BATCH_SIZE);
 				await Promise.all(
@@ -1484,12 +1511,39 @@ export class KnowledgeEngine {
 						if (signal?.aborted) throw new Error("Cancelled");
 						const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
 						if (!extracted) return;
+
+						// File-level dedup: check if content hash matches stored hash
+						const fileHash = fileHashesByPath.get(file.relPath);
+						const contentHash = createHash("sha256").update(extracted.content).digest("hex");
+						if (fileHash === contentHash && existingFileSet.has(file.relPath)) {
+							// File unchanged — skip AST parsing, reuse all existing chunks
+							unchanged += 1;
+							return;
+						}
+
+						staleFilesToRecord.push({ filePath: file.relPath, hash: contentHash });
 						const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
 						scannedFiles++;
 						stagedSymbols.push(...analysis.symbols);
 						await processChunks(analysis.chunks);
 					}),
 				);
+
+				// Record updated file hashes after batch completes
+				if (staleFilesToRecord.length > 0 && this.db) {
+					try {
+						const stmt = this.db.prepare(
+							"INSERT INTO file_hashes (kb_id, file_path, content_hash) VALUES (?, ?, ?) ON CONFLICT(kb_id, file_path) DO UPDATE SET content_hash = excluded.content_hash",
+						);
+						for (const f of staleFilesToRecord) {
+							stmt.run(kb.id, f.filePath, f.hash);
+						}
+					} catch {
+						// Non-fatal — file hash tracking is optimization only
+					}
+					staleFilesToRecord = [];
+				}
+
 				const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
 				updateIndexingJob(this.db, kb.id, {
 					phase: "scanning",
