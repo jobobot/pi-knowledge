@@ -1,4 +1,6 @@
-import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
+import { readFile as readFileAsync } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
@@ -743,7 +745,7 @@ async function extractSourceFileContent(filePath: string, signal?: AbortSignal):
 		// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
 		const { extractText } = await import("unpdf");
 		throwIfAborted(signal);
-		const buf = readFileSync(filePath);
+		const buf = await readFileAsync(filePath);
 		throwIfAborted(signal);
 		const { text } = await extractText(new Uint8Array(buf));
 		throwIfAborted(signal);
@@ -762,7 +764,7 @@ async function extractSourceFileContent(filePath: string, signal?: AbortSignal):
 		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
 	}
 	throwIfAborted(signal);
-	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
+	return { content: (await readFileAsync(filePath, "utf-8")), fileType: "text" };
 }
 
 interface ClassifiedSource {
@@ -1099,15 +1101,27 @@ export class KnowledgeEngine {
 				reportProgress("Stored batch", processedFiles, totalFiles);
 			};
 
-			const addChunks = async (
-				chunks: Awaited<ReturnType<typeof chunkFile>>,
-				processedFiles?: number,
-				totalFiles?: number,
-			): Promise<void> => {
+			// Background flush task: processes pending chunks independently so
+			// file I/O and chunking don't block on embedding. This creates true
+			// producer-consumer overlap — while embeddings compute for batch N,
+			// the next batch's files are already being read and chunked.
+			let flushTask: Promise<void> | null = null;
+			const triggerFlush = (processedFiles?: number, totalFiles?: number): void => {
+				if (flushTask) return; // one background task running at a time
+				flushTask = (async () => {
+					try {
+						while (pendingChunks.length >= embeddingBatchSize) {
+							await flushPending(processedFiles, totalFiles);
+						}
+					} finally {
+						flushTask = null;
+					}
+				})();
+			};
+
+			const addChunks = (chunks: Awaited<ReturnType<typeof chunkFile>>): void => {
 				pendingChunks.push(...chunks);
-				while (pendingChunks.length >= embeddingBatchSize) {
-					await flushPending(processedFiles, totalFiles);
-				}
+				triggerFlush(); // fire-and-forget, don't await
 			};
 			const addSymbols = (content: string, filePath: string, fileType: string): void => {
 				insertSymbols(db, kb.id, extractSymbols(content, filePath, fileType));
@@ -1129,12 +1143,12 @@ export class KnowledgeEngine {
 				const chunks = await chunkUrl(source, signal);
 				fileCount = 1;
 				addSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), source, "html");
-				await addChunks(chunks);
+				addChunks(chunks);
 			} else if (isFile) {
 				const extracted = await extractSourceFileContent(resolvedSource, signal);
 				fileCount = 1;
 				const chunks = await analyzeAndAddSymbols(extracted.content, resolvedSource, extracted.fileType);
-				await addChunks(chunks);
+				addChunks(chunks);
 			} else if (isDir) {
 				const plan = planDirectoryScan(resolvedSource, scanOptions, signal);
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
@@ -1155,22 +1169,39 @@ export class KnowledgeEngine {
 					skipped_total: plan.skippedTotal,
 				});
 				onProgress?.(scanningMessage);
-				const skipped = createSkippedScanStats();
-				let processedFiles = 0;
-				for (const file of iterateScannableFiles(resolvedSource, skipped, scanOptions)) {
+				// Collect all files first to enable parallel processing
+				const skippedForCollect = createSkippedScanStats();
+				const allFiles: ScannableFile[] = [];
+				for (const file of iterateScannableFiles(resolvedSource, skippedForCollect, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
-					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
-					if (!extracted) {
-						latestSkippedTotal = skipped.total;
-						continue;
-					}
-					const chunks = await analyzeAndAddSymbols(extracted.content, file.relPath, extracted.fileType);
-					processedFiles++;
-					latestSkippedTotal = skipped.total;
-					if (chunks.length > 0) fileCount++;
-					await addChunks(chunks, processedFiles, plan.files);
-					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, plan.files, skipped.total);
+					allFiles.push(file);
 				}
+				Object.assign(skipped, skippedForCollect);
+
+				// Process files in parallel batches using Promise.all
+				const PARALLEL_FILE_BATCH_SIZE = 100;
+				let processedFiles = 0;
+				for (let i = 0; i < allFiles.length; i += PARALLEL_FILE_BATCH_SIZE) {
+					const batch = allFiles.slice(i, i + PARALLEL_FILE_BATCH_SIZE);
+					await Promise.all(
+						batch.map(async (file) => {
+							if (signal?.aborted) throw new Error("Cancelled");
+							const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
+							if (!extracted) {
+								latestSkippedTotal = skipped.total;
+								return;
+							}
+							const chunks = await analyzeAndAddSymbols(extracted.content, file.relPath, extracted.fileType);
+							processedFiles++;
+							latestSkippedTotal = skipped.total;
+							if (chunks.length > 0) fileCount++;
+							addChunks(chunks);
+						}),
+					);
+					reportProgress("Chunking", processedFiles, plan.files, skipped.total);
+				}
+				// Wait for any pending background flush to complete
+				if (flushTask) await flushTask;
 				latestSkippedTotal = skipped.total;
 				latestSkippedSummary = summarizeSkippedScan(skipped);
 				const finalizingMessage = `Scanned ${processedFiles} files, skipped ${skipped.total} (${latestSkippedSummary}), finalizing...`;
@@ -1187,7 +1218,7 @@ export class KnowledgeEngine {
 			} else {
 				fileCount = 1;
 				const chunks = await analyzeAndAddSymbols(source, "inline-text", "text");
-				await addChunks(chunks);
+				addChunks(chunks);
 			}
 
 			await flushPending();
@@ -1324,6 +1355,27 @@ export class KnowledgeEngine {
 					oldVectorReader?.close();
 				}
 			}
+			// Load file-level content hashes for fast skip detection during updates
+			const fileHashesByPath = new Map<string, string>();
+			if (this.db && canReuseExistingVectors) {
+				try {
+					this.db.exec(`CREATE TABLE IF NOT EXISTS file_hashes (
+						kb_id TEXT NOT NULL,
+						file_path TEXT NOT NULL,
+						content_hash TEXT NOT NULL,
+						PRIMARY KEY (kb_id, file_path)
+					)`);
+					const rows = this.db.prepare(
+						"SELECT file_path, content_hash FROM file_hashes WHERE kb_id = ?",
+					).all(kb.id) as Array<{ file_path: string; content_hash: string }>;
+					for (const row of rows) {
+						fileHashesByPath.set(row.file_path, row.content_hash);
+					}
+				} catch {
+					// File hashes table creation/query failed; proceed without optimization
+				}
+			}
+
 			const reusableHashes = canReuseExistingVectors
 				? existingHashes
 				: new Map<string, Array<{ id: string; vectorIndex: number }>>();
@@ -1436,30 +1488,75 @@ export class KnowledgeEngine {
 					skipped_total: plan.skippedTotal,
 				});
 				onProgress?.(planningMessage);
-				const skipped = createSkippedScanStats();
-				for (const file of iterateScannableFiles(kb.source_path, skipped, scanOptions)) {
-					if (signal?.aborted) throw new Error("Cancelled");
-					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
-					if (!extracted) continue;
-					const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
-					scannedFiles++;
-					stagedSymbols.push(...analysis.symbols);
-					await processChunks(analysis.chunks);
-					if (scannedFiles % 25 === 0) {
-						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
-						updateIndexingJob(this.db, kb.id, {
-							phase: "scanning",
-							message,
-							processed_files: scannedFiles,
-							processed_chunks: scannedChunks,
-							total_files: plan.files,
-							skipped_total: skipped.total,
-							added_chunks: addedCount,
-							unchanged_chunks: unchanged,
-						});
-						onProgress?.(message);
+				// Collect all files first to enable parallel processing
+			const skippedForCollect = createSkippedScanStats();
+			const allFiles: ScannableFile[] = [];
+			for (const file of iterateScannableFiles(kb.source_path, skippedForCollect, scanOptions)) {
+				if (signal?.aborted) throw new Error("Cancelled");
+				allFiles.push(file);
+			}
+			Object.assign(skipped, skippedForCollect);
+
+			// Prepare hash comparison: build Set of file_paths from existingHashes for O(1) lookup
+			const existingFileSet = new Set(reusableHashes.keys());
+
+			// Process files in parallel batches using Promise.all with file-level hash dedup
+			const PARALLEL_FILE_BATCH_SIZE = 100;
+			let staleFilesToRecord: Array<{ filePath: string; hash: string }> = [];
+
+			for (let i = 0; i < allFiles.length; i += PARALLEL_FILE_BATCH_SIZE) {
+				const batch = allFiles.slice(i, i + PARALLEL_FILE_BATCH_SIZE);
+				await Promise.all(
+					batch.map(async (file) => {
+						if (signal?.aborted) throw new Error("Cancelled");
+						const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
+						if (!extracted) return;
+
+						// File-level dedup: check if content hash matches stored hash
+						const fileHash = fileHashesByPath.get(file.relPath);
+						const contentHash = createHash("sha256").update(extracted.content).digest("hex");
+						if (fileHash === contentHash && existingFileSet.has(file.relPath)) {
+							// File unchanged — skip AST parsing, reuse all existing chunks
+							unchanged += 1;
+							return;
+						}
+
+						staleFilesToRecord.push({ filePath: file.relPath, hash: contentHash });
+						const analysis = await analyzeIndexableContent(extracted.content, file.relPath, extracted.fileType);
+						scannedFiles++;
+						stagedSymbols.push(...analysis.symbols);
+						await processChunks(analysis.chunks);
+					}),
+				);
+
+				// Record updated file hashes after batch completes
+				if (staleFilesToRecord.length > 0 && this.db) {
+					try {
+						const stmt = this.db.prepare(
+							"INSERT INTO file_hashes (kb_id, file_path, content_hash) VALUES (?, ?, ?) ON CONFLICT(kb_id, file_path) DO UPDATE SET content_hash = excluded.content_hash",
+						);
+						for (const f of staleFilesToRecord) {
+							stmt.run(kb.id, f.filePath, f.hash);
+						}
+					} catch {
+						// Non-fatal — file hash tracking is optimization only
 					}
+					staleFilesToRecord = [];
 				}
+
+				const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
+				updateIndexingJob(this.db, kb.id, {
+					phase: "scanning",
+					message,
+					processed_files: scannedFiles,
+					processed_chunks: scannedChunks,
+					total_files: plan.files,
+					skipped_total: skipped.total,
+					added_chunks: addedCount,
+					unchanged_chunks: unchanged,
+				});
+				onProgress?.(message);
+			}
 				latestSkippedTotal = skipped.total;
 				latestSkippedSummary = summarizeSkippedScan(skipped);
 				const message = `Scanned ${scannedFiles} files, skipped ${skipped.total} (${latestSkippedSummary}), reconciling deletes...`;
