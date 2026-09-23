@@ -3,6 +3,7 @@ import { embedInModelWorker } from "../model-worker-client.ts";
 
 export type EmbeddingProvider = "local" | "openai";
 export type EmbeddingPrefix = "query" | "passage";
+export type EmbeddingPrefixStrategy = "on" | "off";
 
 export interface EmbeddingConfig {
 	provider: EmbeddingProvider;
@@ -11,6 +12,7 @@ export interface EmbeddingConfig {
 	maxChars: number;
 	queryPrefix: "query";
 	documentPrefix: "passage";
+	prefixes: EmbeddingPrefixStrategy;
 	pooling: "mean";
 	normalize: true;
 }
@@ -30,13 +32,14 @@ const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_
 const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
 const API_FALLBACK_TO_LOCAL = process.env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK === "local";
 
-function localEmbeddingConfig(maxChars: number): EmbeddingConfig {
+function localEmbeddingConfig(maxChars: number, prefixes: EmbeddingPrefixStrategy): EmbeddingConfig {
 	return {
 		provider: "local",
 		model: DEFAULT_LOCAL_EMBEDDING_MODEL,
 		maxChars,
 		queryPrefix: "query",
 		documentPrefix: "passage",
+		prefixes,
 		pooling: "mean",
 		normalize: true,
 	};
@@ -83,6 +86,13 @@ function providerInstanceHash(value: string): string {
 	return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
+function resolveEmbeddingPrefixStrategy(env: NodeJS.ProcessEnv): EmbeddingPrefixStrategy {
+	const raw = cleanEnv(env.PI_KNOWLEDGE_EMBEDDING_PREFIXES)?.toLowerCase();
+	if (!raw) return "on";
+	if (raw === "on" || raw === "off") return raw;
+	throw new Error(`Unsupported embedding prefix strategy: ${raw}. Use PI_KNOWLEDGE_EMBEDDING_PREFIXES=on or off.`);
+}
+
 export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): EmbeddingConfig {
 	const raw = cleanEnv(env.PI_KNOWLEDGE_EMBEDDING) ?? `local:${DEFAULT_LOCAL_EMBEDDING_MODEL}`;
 	const separator = raw.indexOf(":");
@@ -91,12 +101,13 @@ export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): Em
 	const maxCharsValue = Number(cleanEnv(env.PI_KNOWLEDGE_EMBEDDING_MAX_CHARS) ?? DEFAULT_API_MAX_EMBED_CHARS);
 	const maxChars =
 		Number.isFinite(maxCharsValue) && maxCharsValue > 0 ? Math.trunc(maxCharsValue) : DEFAULT_API_MAX_EMBED_CHARS;
+	const prefixes = resolveEmbeddingPrefixStrategy(env);
 	if (provider === "local") {
 		const localModel = model || DEFAULT_LOCAL_EMBEDDING_MODEL;
 		if (localModel !== DEFAULT_LOCAL_EMBEDDING_MODEL) {
 			throw new Error(`Unsupported local embedding model: ${localModel}`);
 		}
-		return localEmbeddingConfig(maxChars);
+		return localEmbeddingConfig(maxChars, prefixes);
 	}
 	if (provider === "openai") {
 		return {
@@ -107,6 +118,7 @@ export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): Em
 			maxChars,
 			queryPrefix: "query",
 			documentPrefix: "passage",
+			prefixes,
 			pooling: "mean",
 			normalize: true,
 		};
@@ -120,7 +132,7 @@ export function embeddingConfigLabel(config: EmbeddingConfig): string {
 
 export function embeddingSignature(config: EmbeddingConfig, dimension: number): string {
 	const base = config.baseUrl ? `:base-sha256=${providerInstanceHash(config.baseUrl)}` : "";
-	return [
+	const parts = [
 		`${config.provider}:${config.model}${base}`,
 		`dim=${dimension}`,
 		`apiMax=${config.provider === "openai" ? config.maxChars : "none"}`,
@@ -128,7 +140,9 @@ export function embeddingSignature(config: EmbeddingConfig, dimension: number): 
 		`normalize=${config.normalize}`,
 		`q=${config.queryPrefix}`,
 		`d=${config.documentPrefix}`,
-	].join(":");
+	];
+	if (config.prefixes === "off") parts.push("prefixes=off");
+	return parts.join(":");
 }
 
 export async function dispose(): Promise<void> {
@@ -148,16 +162,20 @@ export async function prepareForShutdown(): Promise<void> {
 	await waitForNoActiveRuns();
 }
 
+function applyEmbeddingPrefix(text: string, prefix: EmbeddingPrefix, config: EmbeddingConfig): string {
+	return config.prefixes === "on" ? `${prefix}: ${text}` : text;
+}
+
 async function embedViaAPI(
 	texts: string[],
 	prefix: EmbeddingPrefix,
 	config: EmbeddingConfig,
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-	const prefixedTexts = texts.map((t) => `${prefix}: ${t}`);
-	const safeTexts = prefixedTexts.map((text) =>
-		text.length > config.maxChars ? text.slice(0, config.maxChars) : text,
-	);
+	const safeTexts = texts.map((text) => {
+		const embeddingText = applyEmbeddingPrefix(text, prefix, config);
+		return embeddingText.length > config.maxChars ? embeddingText.slice(0, config.maxChars) : embeddingText;
+	});
 	const apiKey = cleanEnv(process.env.PI_KNOWLEDGE_EMBEDDING_API_KEY) ?? cleanEnv(process.env.OPENAI_API_KEY);
 	if (!config.baseUrl) throw new Error("OpenAI embedding base URL is not configured");
 	const endpoint = new URL("embeddings", `${config.baseUrl.replace(/\/+$/, "")}/`);
@@ -195,12 +213,12 @@ export async function embedTextsWithConfig(
 			console.warn(
 				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,
 			);
-			actualConfig = localEmbeddingConfig(config.maxChars);
+			actualConfig = localEmbeddingConfig(config.maxChars, config.prefixes);
 		}
 	}
 	beginRun();
 	try {
-		return { vectors: await embedInModelWorker(texts, prefix, signal), config: actualConfig };
+		return { vectors: await embedInModelWorker(texts, prefix, actualConfig.prefixes, signal), config: actualConfig };
 	} finally {
 		endRun();
 	}

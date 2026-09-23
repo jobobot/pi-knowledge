@@ -34,6 +34,9 @@
   - Query: `"query: {text}"`
   - Document: `"passage: {text}"`
 
+- `PI_KNOWLEDGE_EMBEDDING_PREFIXES=on` 是預設值，會保留這些 E5-style prefixes。
+- `PI_KNOWLEDGE_EMBEDDING_PREFIXES=off` 只適合已用無 prefix 輸入驗證過的 embedding API 或模型；切換後 embedding signature 會不同，既有 KB 需要 `knowledge_update` 重建向量。預設 `on` 保持既有 signature 相容。
+
 ---
 
 ## 3. Quantized 品質數據

@@ -105,6 +105,42 @@ describe("embedding provider", () => {
 		expect(body.input[0]).toBe("passage: xxxxxxxxxxxxxxxxxxxxxxx");
 	});
 
+	it("sends raw API embedding input when prefixes are disabled", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "off");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		const fetchMock = vi.fn(async (_input: URL | string, _init?: RequestInit) =>
+			jsonResponse({ data: [{ embedding: [0.1, 0.2] }] }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await embedDocuments(["hello"]);
+
+		const [, init] = fetchMock.mock.calls[0];
+		const body = JSON.parse(String(init?.body)) as { input: string[] };
+		expect(body.input).toEqual(["hello"]);
+	});
+
+	it("passes the configured prefix strategy to the local model worker", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "off");
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await embedDocuments(["hello"]);
+
+		expect(workerMock.embedInModelWorker).toHaveBeenCalledWith(["hello"], "passage", "off", undefined);
+	});
+
+	it("rejects unsupported embedding prefix strategies", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "disabled");
+
+		const { resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+
+		expect(() => resolveEmbeddingConfig()).toThrow(
+			"Unsupported embedding prefix strategy: disabled. Use PI_KNOWLEDGE_EMBEDDING_PREFIXES=on or off.",
+		);
+	});
+
 	it("passes AbortSignal to OpenAI-compatible embedding fetch", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("OPENAI_API_KEY", "test-key");
@@ -186,6 +222,18 @@ describe("embedding provider", () => {
 		expect(signature).toContain("apiMax=12345");
 		expect(signature).toContain("base-sha256=");
 		expect(signature).not.toContain("secret-key");
+		expect(signature).not.toContain("prefixes=");
+	});
+
+	it("includes disabled prefixes in embedding signatures", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:text-embedding-3-small");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_PREFIXES", "off");
+		vi.stubEnv("OPENAI_API_KEY", "secret-key");
+
+		const { embeddingSignature, resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+		const signature = embeddingSignature(resolveEmbeddingConfig(), 1536);
+
+		expect(signature).toContain("prefixes=off");
 		expect(signature).not.toContain("internal.example");
 	});
 });

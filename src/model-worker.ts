@@ -34,6 +34,7 @@ type EmbedRequest = {
 	type: "embed";
 	texts: string[];
 	prefix: "query" | "passage";
+	prefixes: "on" | "off";
 };
 
 type RerankRequest = {
@@ -115,11 +116,18 @@ async function loadRerankerPipeline(config: HfRerankerConfig): Promise<RerankerP
 	return loaded;
 }
 
+function applyEmbeddingPrefix(text: string, prefix: "query" | "passage", prefixes: "on" | "off"): string {
+	return prefixes === "on" ? `${prefix}: ${text}` : text;
+}
+
 async function handleEmbed(request: EmbedRequest): Promise<number[][]> {
 	const pipe = await loadEmbeddingPipeline();
 	const vectors: number[][] = [];
 	for (const text of request.texts) {
-		const output = await pipe(`${request.prefix}: ${text}`, { pooling: "mean", normalize: true });
+		const output = await pipe(applyEmbeddingPrefix(text, request.prefix, request.prefixes), {
+			pooling: "mean",
+			normalize: true,
+		});
 		vectors.push(Array.from(output.data));
 	}
 	return vectors;
@@ -166,7 +174,12 @@ function parseWorkerRequest(message: unknown): WorkerRequest {
 		if (!("prefix" in message) || (message.prefix !== "query" && message.prefix !== "passage")) {
 			throw new Error("Invalid embed prefix");
 		}
-		return { id: message.id, type: "embed", texts: message.texts, prefix: message.prefix };
+		const prefixes =
+			"prefixes" in message && (message.prefixes === "on" || message.prefixes === "off") ? message.prefixes : "on";
+		if ("prefixes" in message && message.prefixes !== "on" && message.prefixes !== "off") {
+			throw new Error("Invalid embed prefix strategy");
+		}
+		return { id: message.id, type: "embed", texts: message.texts, prefix: message.prefix, prefixes };
 	}
 	if (message.type === "rerank") {
 		if (!("query" in message) || typeof message.query !== "string") throw new Error("Invalid rerank query");

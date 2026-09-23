@@ -25,6 +25,7 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `OPENAI_API_KEY` | unset | Fallback API key used when `PI_KNOWLEDGE_EMBEDDING=openai:<model>`. Required by OpenAI's hosted API; many local OpenAI-compatible servers do not need it. |
 | `PI_KNOWLEDGE_EMBEDDING_BASE_URL` | unset | OpenAI-compatible embedding API root, such as `http://127.0.0.1:8080/v1`. Takes precedence over `OPENAI_BASE_URL`. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Common OpenAI-compatible API root fallback. |
+| `PI_KNOWLEDGE_EMBEDDING_PREFIXES` | `on` | Controls whether `query: ` and `passage: ` prefixes are prepended before embedding. Values: `on`, `off`. Keep `on` for the default E5 local model; use `off` only for models or self-hosted APIs that are evaluated without E5-style prefixes. |
 | `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` | `20000` | Final per-input API embedding safety cap for OpenAI-compatible servers with smaller context windows. This does not replace chunker bounds. |
 | `PI_KNOWLEDGE_EMBEDDING_BATCH_SIZE` | `64` | Maximum number of document chunks sent in one embedding request during add, update, and import. Lower this for self-hosted embedding servers with smaller request batch limits. |
 | `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` | unset | Set to `local` to explicitly fall back to local embeddings for query embeddings after API failures. Indexing/import/update document batches do not fall back because mixed-provider vector files are unsafe. |
@@ -32,7 +33,7 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
 
-Each KB stores the embedding model label, vector dimension, and a non-secret embedding signature that includes provider/model semantics, query/document prefixes, pooling, normalization, API input cap, and a hash of the API base URL when applicable. `knowledge_search` skips vector retrieval for KBs whose stored signature or dimension is missing or incompatible with the current query embedding and uses BM25-only fallback for hybrid searches. Run `knowledge_update` to rebuild vectors after changing embedding provider/model/max-character settings or after upgrading older KBs with no signature metadata.
+Each KB stores the embedding model label, vector dimension, and a non-secret embedding signature that includes provider/model semantics, query/document prefixes, non-default prefix strategy, pooling, normalization, API input cap, and a hash of the API base URL when applicable. `knowledge_search` skips vector retrieval for KBs whose stored signature or dimension is missing or incompatible with the current query embedding and uses BM25-only fallback for hybrid searches. Run `knowledge_update` to rebuild vectors after changing embedding provider/model/max-character/prefix settings or after upgrading older KBs with no signature metadata.
 
 ## Reranker
 

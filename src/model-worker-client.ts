@@ -425,9 +425,12 @@ function getWorker(): ModelWorkerTransport {
 export async function embedInModelWorker(
 	texts: string[],
 	prefix: "query" | "passage",
+	prefixesOrSignal?: "on" | "off" | AbortSignal,
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-	const result = await getWorker().request({ type: "embed", texts, prefix }, signal);
+	const prefixes = prefixesOrSignal === "off" ? "off" : "on";
+	const requestSignal = typeof prefixesOrSignal === "object" ? prefixesOrSignal : signal;
+	const result = await getWorker().request({ type: "embed", texts, prefix, prefixes }, requestSignal);
 	if (!Array.isArray(result)) throw new Error("Invalid embedding worker response");
 	return result.map((vector) => {
 		if (!Array.isArray(vector)) throw new Error("Invalid embedding vector from worker");
