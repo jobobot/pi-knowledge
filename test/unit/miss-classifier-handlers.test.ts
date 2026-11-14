@@ -197,8 +197,10 @@ describe("knowledge_search handler", () => {
 		expect(text).toContain("matches no knowledge base");
 	});
 
-	it("scenario 7: footer on appends aggregated suffix before the header colon", async () => {
+	it("scenario 7: footer on appends suffix from provenance staleness, never from diagnostics", async () => {
 		state.rows = [docsRow({ name: "a", source_path: "/workdir/a" }), docsRow({ name: "b", source_path: "/workdir/b" })];
+		// Diagnostics deliberately carry stale files too: the hit path must NOT consult them
+		// (audit H-1). Only the results' own provenance flags may produce the stale segment.
 		state.diagnostics = [
 			{ kb_name: "a", stale_files: ["p.ts", "q.ts"] },
 			{ kb_name: "b", stale_files: [] },
@@ -214,6 +216,7 @@ describe("knowledge_search handler", () => {
 					snippet: "s",
 					start_line: 1,
 					end_line: 2,
+					provenance: { chunk_id: "1", chunk_hash: "h", indexed_at: 0, stale: true, match_reason: "hybrid" },
 				},
 				{
 					content: "c",
@@ -224,6 +227,7 @@ describe("knowledge_search handler", () => {
 					snippet: "s",
 					start_line: 1,
 					end_line: 2,
+					provenance: { chunk_id: "2", chunk_hash: "h", indexed_at: 0, stale: false, match_reason: "hybrid" },
 				},
 			],
 			total_count: 2,
@@ -233,7 +237,7 @@ describe("knowledge_search handler", () => {
 		const text = resultText(
 			await tool(tools, "knowledge_search").execute("t", { query: "x" }, undefined, undefined, {}),
 		);
-		expect(text.startsWith("2 results (showing 2) · fresh: 14m · stale: 2 files:")).toBe(true);
+		expect(text.startsWith("2 results (showing 2) · fresh: 14m · stale: 1 files:")).toBe(true);
 	});
 
 	it("footer off → hit header byte-identical to baseline", async () => {
@@ -294,7 +298,7 @@ describe("knowledge_symbol_search handler", () => {
 		expect(text).toBe(LEGACY_SYMBOL_ZERO);
 	});
 
-	it("footer on → symbol header carries the same suffix", async () => {
+	it("footer on → symbol header shows age only (no provenance, no diagnostics on hit path)", async () => {
 		state.rows = [docsRow()];
 		state.diagnostics = [{ kb_name: "docs", stale_files: ["z.ts"] }];
 		state.symbolResponse = {
@@ -318,7 +322,7 @@ describe("knowledge_symbol_search handler", () => {
 		const text = resultText(
 			await tool(tools, "knowledge_symbol_search").execute("t", { query: "foo" }, undefined, undefined, {}),
 		);
-		expect(text.startsWith("1 symbol result(s) · fresh: 14m · stale: 1 files:")).toBe(true);
+		expect(text.startsWith("1 symbol result(s) · fresh: 14m:")).toBe(true);
 	});
 });
 

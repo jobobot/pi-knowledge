@@ -223,6 +223,14 @@ export function buildMissInput(
 	if (response.mode_used !== undefined) input.mode_used = response.mode_used;
 	if (response.retry_modes !== undefined) input.retry_modes = response.retry_modes;
 	if (filters.exact !== undefined) input.exact_requested = filters.exact;
+	// Audit L-3: scope the staleness note to the KBs actually searched. A resolved kb_id narrows to
+	// that KB; a path filter narrows to covering rows; otherwise all KBs (the search was global).
+	if (input.requested_kb_id) {
+		input.note_kb_names = [input.requested_kb_id];
+	} else if (filters.scope_filter !== undefined) {
+		const filter = filters.scope_filter;
+		input.note_kb_names = rows.filter((row) => rowCoversFilter(row, filter)).map((row) => row.name);
+	}
 	if (response.tuning) {
 		input.min_hybrid = response.tuning.min_hybrid_score;
 		input.retrieved_candidates = response.tuning.retrieved_candidates;
@@ -231,16 +239,33 @@ export function buildMissInput(
 	return input;
 }
 
-// §7.4 — one header suffix aggregated over the KBs present in the returned results:
-// worst-case (max) age, summed stale-file counts, stale segment omitted at zero.
-export function freshnessFooterSuffix(scopes: KbScope[], kbNamesInResults: Iterable<string>): string {
+// §7.4 (audit H-1 revision) — one header suffix on hit responses, computed WITHOUT
+// engine.diagnose(): age from the free `updated_at` rows, staleness from the results' own
+// provenance flags (distinct result files whose source changed after indexing). A full
+// diagnostics scan costs ~1.3 s on a large multi-KB store and must never sit on the hit path.
+export function freshnessFooterSuffix(
+	scopes: KbScope[],
+	kbNamesInResults: Iterable<string>,
+	staleFileCount: number,
+): string {
 	const present = new Set(kbNamesInResults);
 	const relevant = scopes.filter((scope) => present.has(scope.name));
 	if (relevant.length === 0) return "";
-	const maxAge = relevant.reduce((max, scope) => Math.max(max, scope.age_min), 0);
-	const staleSum = relevant.reduce((sum, scope) => sum + (scope.stale_files ?? 0), 0);
-	const stalePart = staleSum > 0 ? ` · stale: ${staleSum} files` : "";
+	// Audit L-1: seed at -Infinity so real (and clock-skewed negative) ages flow to the
+	// formatter's clamp instead of being masked by a 0 floor.
+	const maxAge = relevant.reduce((max, scope) => Math.max(max, scope.age_min), Number.NEGATIVE_INFINITY);
+	const stalePart = staleFileCount > 0 ? ` · stale: ${staleFileCount} files` : "";
 	return ` · fresh: ${formatIndexAge(maxAge)}${stalePart}`;
+}
+
+// Audit H-1: per-response stale signal derived from chunk provenance (`source_mtime >
+// indexed_at`), replacing the per-KB diagnostics sweep on the hit path.
+export function hitStaleFileCount(results: Array<{ file_path: string; provenance?: { stale: boolean } }>): number {
+	const stalePaths = new Set<string>();
+	for (const result of results) {
+		if (result.provenance?.stale === true) stalePaths.add(result.file_path);
+	}
+	return stalePaths.size;
 }
 
 function runtimeModule(modulePath: string): string {
@@ -685,6 +710,9 @@ export default function (pi: ExtensionAPI) {
 			if (response.results.length === 0) {
 				let verdictText: string | undefined;
 				if (MISS_CLASSIFIER_ENABLED) {
+					// The miss path deliberately keeps full diagnostics: misses are rare and terminal,
+					// and the staleness note needs whole-KB truth the response itself cannot carry
+					// (audit H-1 scope decision).
 					const rows = engine.list();
 					const scopes = scopesFromRows(rows, engine.diagnose(), Date.now());
 					const verdict = classifyMiss(
@@ -717,9 +745,11 @@ export default function (pi: ExtensionAPI) {
 				output += ` — profile: ${response.tuning.requested_profile}->${response.tuning.selected_profile}`;
 			}
 			if (FRESHNESS_FOOTER_ENABLED) {
+				// Audit H-1: empty diagnostics on the hit path — staleness comes from provenance.
 				output += freshnessFooterSuffix(
-					scopesFromRows(engine.list(), engine.diagnose(), Date.now()),
+					scopesFromRows(engine.list(), [], Date.now()),
 					response.results.map((r) => r.kb_name),
+					hitStaleFileCount(response.results),
 				);
 			}
 			output += ":\n\n";
@@ -843,8 +873,11 @@ export default function (pi: ExtensionAPI) {
 			const suffix = response.has_more ? "\nMore results available; increase offset to continue." : "";
 			const header = FRESHNESS_FOOTER_ENABLED
 				? `${response.total_count} symbol result(s)${freshnessFooterSuffix(
-						scopesFromRows(engine.list(), engine.diagnose(), Date.now()),
+						scopesFromRows(engine.list(), [], Date.now()),
 						response.results.map((r) => r.kb_name),
+						// Symbol results carry no provenance staleness; the footer stays diagnostics-free
+						// (audit H-1) and shows age only.
+						0,
 					)}:`
 				: `${response.total_count} symbol result(s):`;
 			return {

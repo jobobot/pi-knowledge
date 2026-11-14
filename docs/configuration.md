@@ -86,7 +86,7 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 | `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES` | profile default | Override how many filtered candidates `deep` mode sends to the reranker. Clamped to 5-100. |
 | `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` | profile default | Override deep rerank top-k multiplier relative to the effective result limit. Clamped to 1-10. |
 | `PI_KNOWLEDGE_MISS_CLASSIFIER` | on | Set to `off`, `false`, or `0` to restore the legacy generic zero-result texts. When on, `knowledge_search` and `knowledge_symbol_search` name the cause of an empty result from facts known at query time. |
-| `PI_KNOWLEDGE_FRESHNESS_FOOTER` | off | Set to `on`, `true`, or `1` to append an index-freshness suffix (`· fresh: 14m · stale: 3 files`) to hit-response headers, aggregated over the KBs present in the results. |
+| `PI_KNOWLEDGE_FRESHNESS_FOOTER` | off | Set to `on`, `true`, or `1` to append an index-freshness suffix (`· fresh: 14m · stale: 3 files`) to hit-response headers: worst-case index age across the KBs in the results plus the count of result files whose source changed after indexing (taken from the results' own provenance — no diagnostics sweep runs on the hit path). |
 
 Both knobs are read once at extension load; changing a value requires restarting the host. When the classifier is on, a zero-result response states its cause and the in-app remedy, for example:
 

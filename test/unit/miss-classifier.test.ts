@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 // index.ts loads with only local static imports (pi types are structural shims), so importing
 // its exported assemblers in a unit test is safe without mocks or runtime env.
-import { buildMissInput, freshnessFooterSuffix, scopesFromRows } from "../../index.ts";
+import { buildMissInput, freshnessFooterSuffix, hitStaleFileCount, scopesFromRows } from "../../index.ts";
 import { classifyMiss, formatIndexAge, type KbScope, type MissInput, type MissVerdict } from "../../src/search/miss.ts";
 
 function kb(overrides: Partial<KbScope> & { name: string }): KbScope {
@@ -187,6 +187,30 @@ describe("classifyMiss cause table", () => {
 				"No results: candidates were retrieved and ranked, but none passed final filtering. Try a broader mode or different terms.",
 		},
 		{
+			title: "search no-match fallback after deep (no broader mode exists)",
+			input: baseInput({
+				tool: "search",
+				mode_used: "deep",
+				retrieved_candidates: 20,
+				filtered_candidates: 12,
+			}),
+			expected:
+				"No results: candidates were retrieved and ranked, but none passed final filtering. Rephrase with terms from the target files.",
+		},
+		{
+			title: "search no-match fallback with path filter set names the filter",
+			input: baseInput({
+				tool: "search",
+				mode_used: "hybrid",
+				scope_filter: "/workdir/notes",
+				scope_matches: 1,
+				retrieved_candidates: 30,
+				filtered_candidates: 30,
+			}),
+			expected:
+				"No results: candidates were retrieved and ranked, but none matched the file-type/path filters. Widen the filter or rephrase.",
+		},
+		{
 			title: "symbol no-match, exact flag",
 			input: baseInput({ tool: "symbol", exact_requested: true }),
 			expected:
@@ -289,6 +313,45 @@ describe("classifyMiss caps and notes", () => {
 		expect(verdict.stale_note).toBe(
 			'"docs" has 3 files changed after indexing — knowledge_update refreshes without re-adding.',
 		);
+	});
+
+	it("staleness note is suppressed on no-kbs and kb-not-found causes (audit M-1)", () => {
+		const noKbs = classifyMiss(
+			baseInput({ tool: "search", kb_count: 0, known_kb_names: [], kbs: [kb({ name: "ghost", stale_files: 4 })] }),
+		);
+		expect(noKbs.lines[0]).toContain("no knowledge bases are indexed yet");
+		expect(noKbs.stale_note).toBeUndefined();
+		const badKb = classifyMiss(
+			baseInput({
+				tool: "search",
+				requested_kb_id: "missing",
+				known_kb_names: ["docs"],
+				kbs: [kb({ name: "docs", stale_files: 2 })],
+			}),
+		);
+		expect(badKb.lines[0]).toContain("matches no knowledge base");
+		expect(badKb.stale_note).toBeUndefined();
+	});
+
+	it("note subjects are limited to scope-relevant KBs (audit L-3)", () => {
+		const verdict = classifyMiss(
+			baseInput({
+				tool: "search",
+				requested_kb_id: "docs",
+				kbs: [kb({ name: "far", age_min: 9999 }), kb({ name: "docs", age_min: 5 })],
+				note_kb_names: ["docs"],
+			}),
+		);
+		expect(verdict.stale_note).toBeUndefined();
+		const scoped = classifyMiss(
+			baseInput({
+				tool: "search",
+				requested_kb_id: "far",
+				kbs: [kb({ name: "far", age_min: 9999 }), kb({ name: "docs", age_min: 5 })],
+				note_kb_names: ["far"],
+			}),
+		);
+		expect(scoped.stale_note).toContain('"far" was last indexed 7d');
 	});
 
 	it("age note only past one day", () => {
@@ -424,15 +487,22 @@ describe("assembler helpers", () => {
 		expect(without.retrieved_candidates).toBeUndefined();
 	});
 
-	it("freshness footer: worst-case age, summed stale, omitted segment at zero", () => {
-		const scopes = [
-			kb({ name: "a", age_min: 14, stale_files: 2 }),
-			kb({ name: "b", age_min: 90 }),
-			kb({ name: "c", age_min: 5 }),
+	it("freshness footer: worst-case age, explicit stale count, omitted segment at zero (audit H-1)", () => {
+		const scopes = [kb({ name: "a", age_min: 14 }), kb({ name: "b", age_min: 90 }), kb({ name: "c", age_min: 5 })];
+		expect(freshnessFooterSuffix(scopes, ["a", "b"], 2)).toBe(" · fresh: 2h · stale: 2 files");
+		expect(freshnessFooterSuffix(scopes, ["a"], 0)).toBe(" · fresh: 14m");
+		expect(freshnessFooterSuffix(scopes, ["zz"], 5)).toBe("");
+		// Audit L-1: negative (clock-skewed) ages clamp to 0m rather than being masked.
+		expect(freshnessFooterSuffix([kb({ name: "a", age_min: -3 })], ["a"], 0)).toBe(" · fresh: 0m");
+	});
+
+	it("hitStaleFileCount counts distinct stale file paths from provenance only", () => {
+		const results = [
+			{ file_path: "a.ts", provenance: { stale: true } },
+			{ file_path: "a.ts", provenance: { stale: true } },
+			{ file_path: "b.ts", provenance: { stale: false } },
+			{ file_path: "c.ts" },
 		];
-		expect(freshnessFooterSuffix(scopes, ["a", "b"])).toBe(" · fresh: 2h · stale: 2 files");
-		expect(freshnessFooterSuffix(scopes, ["a"])).toBe(" · fresh: 14m · stale: 2 files");
-		expect(freshnessFooterSuffix(scopes, ["b"])).toBe(" · fresh: 2h");
-		expect(freshnessFooterSuffix(scopes, ["zz"])).toBe("");
+		expect(hitStaleFileCount(results)).toBe(1);
 	});
 });
