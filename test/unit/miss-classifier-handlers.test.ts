@@ -321,3 +321,13 @@ describe("knowledge_symbol_search handler", () => {
 		expect(text.startsWith("1 symbol result(s) · fresh: 14m · stale: 1 files:")).toBe(true);
 	});
 });
+
+describe("tool descriptions", () => {
+	it("carry the routing lines", async () => {
+		state.rows = [];
+		state.diagnostics = [];
+		const tools = await loadTools({});
+		expect(tool(tools, "knowledge_search").description).toContain("First call for any question about code or docs");
+		expect(tool(tools, "knowledge_symbol_search").description).toContain("Exact-name lookup over indexed KBs");
+	});
+});

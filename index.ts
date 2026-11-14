@@ -582,7 +582,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_search",
 		label: "Knowledge Search",
-		description: "Search indexed knowledge bases using lexical BM25, semantic vectors, reranking, and filters",
+		description:
+			"Search indexed knowledge bases using lexical BM25, semantic vectors, reranking, and filters. First call for any question about code or docs you have not yet read this session; use `read` only for byte-exact current content of a known path.",
 		approval: "read",
 		promptSnippet: "Search knowledge bases (hybrid is lexical-anchored BM25 + semantic fusion)",
 		promptGuidelines: [
@@ -759,7 +760,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_symbol_search",
 		label: "Knowledge Symbol Search",
 		description:
-			"Search indexed code symbols, Markdown headings, config keys, and environment variables exactly or by substring",
+			"Search indexed code symbols, Markdown headings, config keys, and environment variables exactly or by substring. Exact-name lookup over indexed KBs (symbols, config keys, env vars, routes, headings); a miss names its cause.",
 		approval: "read",
 		promptSnippet: "Find exact symbols/config keys/headings before broad semantic search",
 		promptGuidelines: [
