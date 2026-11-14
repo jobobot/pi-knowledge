@@ -85,6 +85,22 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 | `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET` | profile default | Override the number of nearby/query-relevant chunks considered for adaptive windows. Clamped to 1-20. |
 | `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES` | profile default | Override how many filtered candidates `deep` mode sends to the reranker. Clamped to 5-100. |
 | `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` | profile default | Override deep rerank top-k multiplier relative to the effective result limit. Clamped to 1-10. |
+| `PI_KNOWLEDGE_MISS_CLASSIFIER` | on | Set to `off`, `false`, or `0` to restore the legacy generic zero-result texts. When on, `knowledge_search` and `knowledge_symbol_search` name the cause of an empty result from facts known at query time. |
+| `PI_KNOWLEDGE_FRESHNESS_FOOTER` | off | Set to `on`, `true`, or `1` to append an index-freshness suffix (`· fresh: 14m · stale: 3 files`) to hit-response headers, aggregated over the KBs present in the results. |
+
+Both knobs are read once at extension load; changing a value requires restarting the host. When the classifier is on, a zero-result response states its cause and the in-app remedy, for example:
+
+```text
+Before: No results found.
+        Suggestions: Try mode 'fast' for exact symbols, … | Run knowledge_status …
+
+After:  No results found.
+        Mode used: hybrid
+        No results: 40 candidates retrieved, all below min_hybrid 0.18. Try mode "semantic_hybrid".
+        "docs" has 3 files changed after indexing — knowledge_update refreshes without re-adding.
+```
+
+Cause priority is fixed: no KBs indexed → `kb_id` matches nothing → path filter covers nothing → a KB is still indexing → candidates retrieved but all filtered below threshold → zero candidates → plain no-match. Recommendations never repeat a mode the call already attempted.
 
 Search diagnostics include result provenance and applied search tuning in both text output and structured `details`: selected profile, effective limit, snippet length, hybrid threshold, global candidate limit, per-KB retrieval limit, retrieved/filtered/diversity candidate counts, global-pool truncation, chunk id, chunk hash, match reason, indexed timestamp, stale flag, and source mtime when the original source file is available. This provenance is stored in SQLite and derived from indexed source metadata; it does not create or modify files in the indexed project.
 
@@ -94,7 +110,7 @@ Search diagnostics include result provenance and applied search tuning in both t
 
 `knowledge_configure` writes runtime configuration to the knowledge directory's `config.json`. It validates Node 22+ before persisting `node_path`, so agents can configure a Codex- or user-installed `node.exe` once without relying on environment variables being injected into an already-running OMP process.
 
-`knowledge_symbol_search` uses a lightweight symbol index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find AST-backed methods/functions/classes/interfaces/types/variables for supported code files, route-like handlers, Markdown headings, config keys, and environment variables. It is not a full LSP or code graph; it does not answer caller/callee or rename-safety questions. For empty important lookups, use `knowledge_search` mode `fast`/`adaptive` and check `knowledge_doctor` for stale or missing symbol metadata. Older file/directory/URL KBs without symbol metadata should be updated before relying on symbol lookup. Imported portable KBs and inline text KBs do not retain an active source path; rebuild their symbols by re-importing or re-adding the content.
+`knowledge_symbol_search` uses a lightweight symbol index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find AST-backed methods/functions/classes/interfaces/types/variables for supported code files, route-like handlers, Markdown headings, config keys, and environment variables. It is not a full LSP or code graph; it does not answer caller/callee or rename-safety questions. For empty important lookups, read the cause named in the miss response (with `PI_KNOWLEDGE_MISS_CLASSIFIER` on), and check `knowledge_doctor` for stale or missing symbol metadata. Older file/directory/URL KBs without symbol metadata should be updated before relying on symbol lookup. Imported portable KBs and inline text KBs do not retain an active source path; rebuild their symbols by re-importing or re-adding the content.
 
 ## Test and Release Fixtures
 
