@@ -1,4 +1,5 @@
 import { MAX_SEARCH_RESULTS, MAX_SEARCH_WINDOW } from "./src/search/contracts.ts";
+import { classifyMiss, formatIndexAge, type KbScope, type MissInput } from "./src/search/miss.ts";
 import { formatKnowledgeStatus } from "./src/status.ts";
 
 type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
@@ -84,6 +85,16 @@ const RUNTIME_EXTENSION = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
 const WATCH_ENABLED = process.env.PI_KNOWLEDGE_WATCH === "true";
 const AUTO_INJECT = process.env.PI_KNOWLEDGE_AUTO_INJECT === "true";
 
+// Zero-result cause classifier: on by default; only an explicit off-value disables it (plan §7.5).
+// Freshness footer on hit responses: off by default; only these three values enable it.
+// Both are read once at module load — changing a value requires a host restart.
+const MISS_CLASSIFIER_ENABLED = !["off", "false", "0"].includes(
+	(process.env.PI_KNOWLEDGE_MISS_CLASSIFIER ?? "").trim().toLowerCase(),
+);
+const FRESHNESS_FOOTER_ENABLED = ["on", "true", "1"].includes(
+	(process.env.PI_KNOWLEDGE_FRESHNESS_FOOTER ?? "").trim().toLowerCase(),
+);
+
 let runtime: Runtime | undefined;
 let runtimePromise: Promise<Runtime> | undefined;
 let initializePromise: Promise<Runtime> | undefined;
@@ -114,6 +125,122 @@ function scanOptionsFromSourceOptions(raw: string | null | undefined): {
 	} catch {
 		return {};
 	}
+}
+
+// ── Zero-result classification assemblers (plan.20261113.01 §T-03/T-04/T-06) ─────────────────
+// Scope matching is deliberately conservative: partial or unusual patterns count as covered, so
+// a coverage claim is only ever made from explicit filter facts against stored scope strings.
+
+type KbRow = ReturnType<KnowledgeEngineInstance["list"]>;
+type KbRowItem = KbRow[number];
+type MissResponseLike = {
+	mode_used?: string;
+	retry_modes?: string[];
+	tuning?: {
+		min_hybrid_score: number;
+		retrieved_candidates: number;
+		filtered_candidates: number;
+	};
+};
+
+function intersectsPath(a: string, b: string): boolean {
+	return a.includes(b) || b.includes(a);
+}
+
+// Strict path containment: `path` lies within (or equals) the `prefix` subtree.
+function isWithinPrefix(prefix: string, path: string): boolean {
+	return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+// A row covers the filter when its source_path intersects it, unless the filter lies entirely
+// inside one exclude subtree — excludes shrink scope, they never create a match. Rows without a
+// source_path (text/url sources) are scope-agnostic and always count as covering: they can never
+// justify a coverage negative.
+function rowCoversFilter(row: KbRowItem, filter: string): boolean {
+	if (!row.source_path) return true;
+	if (!intersectsPath(row.source_path, filter)) return false;
+	const base = row.source_path.replace(/\/+$/, "");
+	for (const exclude of scanOptionsFromSourceOptions(row.source_options).excludePaths ?? []) {
+		const absolute = `${base}/${exclude.replace(/^\/+/, "")}`;
+		if (isWithinPrefix(absolute, filter)) return false;
+	}
+	return true;
+}
+
+function scopeMatchesCount(rows: KbRow, filter: string | undefined): number {
+	if (!filter) return 0;
+	return rows.filter((row) => rowCoversFilter(row, filter)).length;
+}
+
+// kb_id contract (src/search/miss.ts): the resolved KB display name when the param matches an
+// id or name, the raw param when it matches nothing (drives `kb-not-found`), else undefined.
+function resolveKbParam(rows: KbRow, kbId: string | undefined): string | undefined {
+	if (!kbId) return undefined;
+	const match = rows.find((row) => row.id === kbId || row.name === kbId);
+	return match ? match.name : kbId;
+}
+
+export function scopesFromRows(
+	rows: KbRow,
+	diagnostics: Array<{ kb_name: string; stale_files: string[] }>,
+	now: number,
+): KbScope[] {
+	const staleByName = new Map<string, number>();
+	for (const diagnostic of diagnostics) {
+		if (diagnostic.stale_files.length > 0) staleByName.set(diagnostic.kb_name, diagnostic.stale_files.length);
+	}
+	return rows.map((row) => {
+		const scope: KbScope = {
+			name: row.name,
+			source_path: row.source_path,
+			status: row.status,
+			chunk_count: row.chunk_count,
+			age_min: Math.round((now - row.updated_at) / 60_000),
+		};
+		const stale = staleByName.get(row.name);
+		if (stale !== undefined) scope.stale_files = stale;
+		return scope;
+	});
+}
+
+export function buildMissInput(
+	tool: "search" | "symbol",
+	rows: KbRow,
+	scopes: KbScope[],
+	filters: { kb_id?: string; scope_filter?: string; exact?: boolean },
+	response: MissResponseLike,
+): MissInput {
+	const input: MissInput = {
+		tool,
+		kb_count: rows.length,
+		known_kb_names: rows.map((row) => row.name),
+		requested_kb_id: resolveKbParam(rows, filters.kb_id),
+		scope_matches: scopeMatchesCount(rows, filters.scope_filter),
+		indexing_in_flight: rows.some((row) => row.status === "indexing"),
+		kbs: scopes,
+	};
+	if (filters.scope_filter !== undefined) input.scope_filter = filters.scope_filter;
+	if (response.mode_used !== undefined) input.mode_used = response.mode_used;
+	if (response.retry_modes !== undefined) input.retry_modes = response.retry_modes;
+	if (filters.exact !== undefined) input.exact_requested = filters.exact;
+	if (response.tuning) {
+		input.min_hybrid = response.tuning.min_hybrid_score;
+		input.retrieved_candidates = response.tuning.retrieved_candidates;
+		input.filtered_candidates = response.tuning.filtered_candidates;
+	}
+	return input;
+}
+
+// §7.4 — one header suffix aggregated over the KBs present in the returned results:
+// worst-case (max) age, summed stale-file counts, stale segment omitted at zero.
+export function freshnessFooterSuffix(scopes: KbScope[], kbNamesInResults: Iterable<string>): string {
+	const present = new Set(kbNamesInResults);
+	const relevant = scopes.filter((scope) => present.has(scope.name));
+	if (relevant.length === 0) return "";
+	const maxAge = relevant.reduce((max, scope) => Math.max(max, scope.age_min), 0);
+	const staleSum = relevant.reduce((sum, scope) => sum + (scope.stale_files ?? 0), 0);
+	const stalePart = staleSum > 0 ? ` · stale: ${staleSum} files` : "";
+	return ` · fresh: ${formatIndexAge(maxAge)}${stalePart}`;
 }
 
 function runtimeModule(modulePath: string): string {
@@ -555,6 +682,15 @@ export default function (pi: ExtensionAPI) {
 			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
 			const response = await engine.search(query, { mode, profile, limit, kb_id, offset, filters, diversity }, _signal);
 			if (response.results.length === 0) {
+				let verdictText: string | undefined;
+				if (MISS_CLASSIFIER_ENABLED) {
+					const rows = engine.list();
+					const scopes = scopesFromRows(rows, engine.diagnose(), Date.now());
+					const verdict = classifyMiss(
+						buildMissInput("search", rows, scopes, { kb_id, scope_filter: path_pattern }, response),
+					);
+					verdictText = [...verdict.lines, verdict.stale_note ?? ""].filter(Boolean).join("\n");
+				}
 				const details = [
 					"No results found.",
 					response.mode_used ? `Mode used: ${response.mode_used}` : "",
@@ -563,7 +699,11 @@ export default function (pi: ExtensionAPI) {
 					diagnostics && response.tuning
 						? `Tuning: profile=${response.tuning.requested_profile}->${response.tuning.selected_profile}, limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.diversity_candidates}/${response.tuning.candidate_limit}, retrieval_per_kb=${response.tuning.retrieval_limit_per_kb}, retrieved=${response.tuning.retrieved_candidates}, filtered=${response.tuning.filtered_candidates}, truncated=${response.tuning.candidate_pool_truncated}`
 						: "",
-					response.suggestions?.length ? `Suggestions: ${response.suggestions.join(" | ")}` : "",
+					MISS_CLASSIFIER_ENABLED
+						? (verdictText ?? "")
+						: response.suggestions?.length
+							? `Suggestions: ${response.suggestions.join(" | ")}`
+							: "",
 				]
 					.filter(Boolean)
 					.join("\n");
@@ -574,6 +714,12 @@ export default function (pi: ExtensionAPI) {
 			if (response.retry_modes?.length) output += ` — retried: ${response.retry_modes.join(", ")}`;
 			if (diagnostics && response.tuning) {
 				output += ` — profile: ${response.tuning.requested_profile}->${response.tuning.selected_profile}`;
+			}
+			if (FRESHNESS_FOOTER_ENABLED) {
+				output += freshnessFooterSuffix(
+					scopesFromRows(engine.list(), engine.diagnose(), Date.now()),
+					response.results.map((r) => r.kb_name),
+				);
 			}
 			output += ":\n\n";
 			if (response.warnings?.length) {
@@ -660,6 +806,26 @@ export default function (pi: ExtensionAPI) {
 				_signal,
 			);
 			if (response.results.length === 0) {
+				if (MISS_CLASSIFIER_ENABLED) {
+					const rows = engine.list();
+					const scopes = scopesFromRows(rows, engine.diagnose(), Date.now());
+					const verdict = classifyMiss(
+						buildMissInput(
+							"symbol",
+							rows,
+							scopes,
+							{
+								kb_id: (params as { kb_id?: string }).kb_id,
+								scope_filter: (params as { file_pattern?: string }).file_pattern,
+								exact: (params as { exact?: boolean }).exact === true,
+							},
+							// SymbolSearchResponse carries no mode/tuning facts by design (plan §4).
+							{},
+						),
+					);
+					const classified = [...verdict.lines, verdict.stale_note ?? ""].filter(Boolean).join("\n");
+					return { content: [{ type: "text", text: classified }] };
+				}
 				return {
 					content: [
 						{
@@ -674,11 +840,17 @@ export default function (pi: ExtensionAPI) {
 				return `[${index + 1}] ${result.name} (${result.kind}) ${result.file_path}:${result.start_line}-${result.end_line} [${result.kb_name}]${signature}`;
 			});
 			const suffix = response.has_more ? "\nMore results available; increase offset to continue." : "";
+			const header = FRESHNESS_FOOTER_ENABLED
+				? `${response.total_count} symbol result(s)${freshnessFooterSuffix(
+						scopesFromRows(engine.list(), engine.diagnose(), Date.now()),
+						response.results.map((r) => r.kb_name),
+					)}:`
+				: `${response.total_count} symbol result(s):`;
 			return {
 				content: [
 					{
 						type: "text",
-						text: `${response.total_count} symbol result(s):\n\n${lines.join("\n")}${suffix}`,
+						text: `${header}\n\n${lines.join("\n")}${suffix}`,
 					},
 				],
 			};

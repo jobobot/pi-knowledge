@@ -103,6 +103,11 @@ vi.mock("../../src/engine.ts", () => ({
 			return [];
 		}
 
+		diagnose(signal?: AbortSignal): Array<{ kb_name: string; stale_files: string[] }> {
+			if (signal?.aborted) throw new Error("Cancelled");
+			return [];
+		}
+
 		async search(_query: string, options: unknown): Promise<typeof toolState.searchResponse> {
 			toolState.searchOptions = options;
 			return toolState.searchResponse;
@@ -248,7 +253,7 @@ describe("public tool contracts", () => {
 		expect(toolState.clearCalls).toBe(1);
 	});
 
-	it("guides empty symbol lookups toward fallback search and doctor checks", async () => {
+	it("classifies empty symbol lookups by cause (no-kbs when nothing is indexed)", async () => {
 		const tools = await registeredTools();
 
 		const result = await tools.knowledge_symbol_search.execute?.(
@@ -259,8 +264,11 @@ describe("public tool contracts", () => {
 			undefined,
 		);
 
-		expect(result?.content[0].text).toMatch(/knowledge_search/i);
-		expect(result?.content[0].text).toMatch(/knowledge_doctor/i);
+		// Zero-result contract (plan.20261113.01): the miss names its cause with an in-app
+		// remedy instead of a hypothetical list; priority chain puts no-kbs first when the
+		// fake engine reports no indexed knowledge bases.
+		expect(result?.content[0].text).toMatch(/no knowledge bases are indexed yet/);
+		expect(result?.content[0].text).toMatch(/knowledge_add/);
 	});
 
 	it("propagates cancellation to directory planning and update execution", async () => {
